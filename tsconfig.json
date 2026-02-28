@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "module": "commonjs",
+    "target": "es2022",
+    "moduleResolution": "node",
+    "declaration": true,
+    "esModuleInterop": true,
+    "baseUrl": ".",
+    "paths": {
+      "@platformatic/vfs": ["."]
+    }
+  },
+  "include": ["index.d.ts", "test/types.tst.ts"]
+}

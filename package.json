@@ -1,0 +1,44 @@
+{
+  "name": "@platformatic/vfs",
+  "version": "0.1.0",
+  "description": "Virtual File System for Node.js - userland shim for node:vfs",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": "./index.js"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "test": "node --test test/*.js",
+    "test:types": "tstyche"
+  },
+  "keywords": [
+    "vfs",
+    "virtual-filesystem",
+    "in-memory-fs",
+    "fs",
+    "mount"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/platformatic/vfs.git"
+  },
+  "engines": {
+    "node": ">= 22"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "lib/**/*.js",
+    "LICENSE"
+  ],
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@stylistic/eslint-plugin-js": "^4.4.1",
+    "@types/node": "^25.3.2",
+    "eslint": "^10.0.2",
+    "tstyche": "^3.5.0",
+    "typescript": "^5.8.2"
+  }
+}
