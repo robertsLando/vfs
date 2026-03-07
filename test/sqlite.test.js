@@ -523,18 +523,25 @@ describe('SqliteProvider - read-only', () => {
 
 describe('SqliteProvider - watch', () => {
   let provider;
+  const openWatchers = [];
 
   beforeEach(() => {
     provider = new SqliteProvider();
   });
 
   afterEach(() => {
+    for (const w of openWatchers) {
+      if (typeof w.close === 'function') w.close();
+      if (typeof w.return === 'function') w.return();
+    }
+    openWatchers.length = 0;
     provider.close();
   });
 
   it('watch returns a watcher that emits change events', async () => {
     provider.writeFileSync('/watch-test.txt', 'initial');
-    const watcher = provider.watch('/watch-test.txt', { persistent: false, interval: 50 });
+    const watcher = provider.watch('/watch-test.txt', { interval: 50 });
+    openWatchers.push(watcher);
 
     const event = await new Promise((resolve) => {
       watcher.on('change', (eventType, filename) => {
@@ -553,7 +560,8 @@ describe('SqliteProvider - watch', () => {
 
   it('watchAsync returns an async iterable', async () => {
     provider.writeFileSync('/async-watch.txt', 'initial');
-    const watcher = provider.watchAsync('/async-watch.txt', { persistent: false, interval: 50 });
+    const watcher = provider.watchAsync('/async-watch.txt', { interval: 50 });
+    openWatchers.push(watcher);
 
     setTimeout(() => {
       provider.writeFileSync('/async-watch.txt', 'changed!');
@@ -574,7 +582,7 @@ describe('SqliteProvider - watch', () => {
       done();
     };
 
-    provider.watchFile('/stat-watch.txt', { persistent: false, interval: 50 }, listener);
+    provider.watchFile('/stat-watch.txt', { interval: 50 }, listener);
 
     setTimeout(() => {
       provider.writeFileSync('/stat-watch.txt', 'changed!');
@@ -583,7 +591,7 @@ describe('SqliteProvider - watch', () => {
 
   it('unwatchFile without listener removes all listeners', () => {
     provider.writeFileSync('/unwatch.txt', 'data');
-    provider.watchFile('/unwatch.txt', { persistent: false, interval: 50 }, () => {});
+    provider.watchFile('/unwatch.txt', { interval: 50 }, () => {});
     provider.unwatchFile('/unwatch.txt');
     // Should not throw
   });
