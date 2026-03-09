@@ -184,6 +184,33 @@ provider.setReadOnly();
 vfs.writeFileSync('/other.txt', 'fail'); // throws EROFS
 ```
 
+#### `SqliteProvider`
+
+A persistent provider backed by Node.js built-in `node:sqlite`. Stores files, directories, and symlinks in a SQLite database. Supports both in-memory and file-backed databases.
+
+```js
+const { SqliteProvider, create } = require('@platformatic/vfs');
+
+// In-memory (default)
+const mem = new SqliteProvider();
+const vfs1 = create(mem);
+
+// File-backed — data persists across restarts
+const disk = new SqliteProvider('/tmp/myfs.db');
+const vfs2 = create(disk);
+
+vfs2.writeFileSync('/file.txt', 'hello');
+disk.close();
+
+// Reopen later — files are still there
+const disk2 = new SqliteProvider('/tmp/myfs.db');
+const vfs3 = create(disk2);
+vfs3.readFileSync('/file.txt', 'utf8'); // 'hello'
+disk2.close();
+```
+
+Requires Node.js >= 22. Call `provider.close()` when done to close the database.
+
 #### `RealFSProvider`
 
 Delegates to the real filesystem, sandboxed under a root directory. Directory traversal outside the root is prevented.
