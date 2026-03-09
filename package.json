@@ -19,7 +19,7 @@
     "fs",
     "mount"
   ],
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/platformatic/vfs.git"
