@@ -258,6 +258,10 @@ This means third-party code using `require()` or `fs.readFileSync()` will transp
 
 Module resolution supports package.json `exports`, `main`, and bare specifier resolution walking `node_modules`.
 
+## Node.js core VFS support
+
+This package is a direct extraction of the Virtual File System being added to Node.js core ([nodejs/node#61478](https://github.com/nodejs/node/pull/61478)), allowing it to be used on Node.js 22+. Once the core PR lands, this package will no longer be necessary (except for `SqliteProvider`).
+
 ## License
 
 MIT
