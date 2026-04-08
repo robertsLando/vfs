@@ -1,13 +1,13 @@
 {
-  "name": "@platformatic/vfs",
+  "name": "@robertslando/vfs",
   "version": "0.3.0",
   "description": "Virtual File System for Node.js - userland shim for node:vfs",
-  "homepage": "https://github.com/platformatic/vfs",
+  "homepage": "https://github.com/robertsLando/vfs",
   "author": "Platformatic Inc. <oss@platformatic.dev> (https://platformatic.dev)",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/platformatic/vfs.git"
+    "url": "git+https://github.com/robertsLando/vfs.git"
   },
   "keywords": [
     "vfs",
@@ -17,7 +17,7 @@
     "mount"
   ],
   "bugs": {
-    "url": "https://github.com/platformatic/vfs/issues"
+    "url": "https://github.com/robertsLando/vfs/issues"
   },
   "private": false,
   "files": [
@@ -50,6 +50,9 @@
     "semver": "^7.7.4",
     "tstyche": "^3.5.0",
     "typescript": "^5.8.2"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "engines": {
     "node": ">= 22"
