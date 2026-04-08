@@ -1,5 +1,5 @@
 {
-  "name": "@robertslando/vfs",
+  "name": "@roberts_lando/vfs",
   "version": "0.3.0",
   "description": "Virtual File System for Node.js - userland shim for node:vfs",
   "homepage": "https://github.com/robertsLando/vfs",
