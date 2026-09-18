@@ -100,6 +100,61 @@ describe('Module hooks — fs sync patches', () => {
     const target = fs.readlinkSync('/vfs-test-sync-readlink/my-link.txt');
     assert.strictEqual(target, '/vfs-test-sync-readlink/link-target.txt');
   });
+
+  it('fs.readlinkSync raises EINVAL for a path that is not a link', () => {
+    // Answering readlink through realpathSync could not tell a link from an
+    // ordinary file, so every existing path looked like a self-pointing link.
+    vfs = create();
+    vfs.writeFileSync('/plain.txt', 'data');
+    vfs.mount('/vfs-test-sync-readlink-einval');
+
+    assert.throws(
+      () => fs.readlinkSync('/vfs-test-sync-readlink-einval/plain.txt'),
+      { code: 'EINVAL' },
+    );
+  });
+
+  it('fs.readlinkSync returns a relative link body verbatim', () => {
+    // POSIX readlink answers the link body; only an absolute target names a
+    // provider path that has to be mapped into the mounted namespace.
+    vfs = create();
+    vfs.mkdirSync('/dir', { recursive: true });
+    vfs.writeFileSync('/dir/target.txt', 'data');
+    vfs.symlinkSync('./target.txt', '/dir/rel-link.txt');
+    vfs.mount('/vfs-test-sync-readlink-rel');
+
+    assert.strictEqual(
+      fs.readlinkSync('/vfs-test-sync-readlink-rel/dir/rel-link.txt'),
+      './target.txt',
+    );
+  });
+
+  it('fs.lstatSync describes the link, not its target', () => {
+    // lstat used to share findVFSForFsStat, which calls statSync and so
+    // followed the link — isSymbolicLink() was never true inside a VFS.
+    vfs = create();
+    vfs.writeFileSync('/lstat-target.txt', 'data');
+    vfs.symlinkSync('/lstat-target.txt', '/lstat-link.txt');
+    vfs.mount('/vfs-test-sync-lstat');
+
+    const lstats = fs.lstatSync('/vfs-test-sync-lstat/lstat-link.txt');
+    assert.strictEqual(lstats.isSymbolicLink(), true);
+    assert.strictEqual(lstats.isFile(), false);
+
+    const stats = fs.statSync('/vfs-test-sync-lstat/lstat-link.txt');
+    assert.strictEqual(stats.isSymbolicLink(), false);
+    assert.strictEqual(stats.isFile(), true);
+  });
+
+  it('fs.lstatSync still stats a plain file the same way', () => {
+    vfs = create();
+    vfs.writeFileSync('/plain-lstat.txt', 'data');
+    vfs.mount('/vfs-test-sync-lstat-plain');
+
+    const stats = fs.lstatSync('/vfs-test-sync-lstat-plain/plain-lstat.txt');
+    assert.strictEqual(stats.isFile(), true);
+    assert.strictEqual(stats.isSymbolicLink(), false);
+  });
 });
 
 describe('Module hooks — fs.access callback', () => {
