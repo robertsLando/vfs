@@ -252,15 +252,26 @@ Higher-level operations (`readFile`, `writeFile`, `copyFile`, `exists`, `access`
 When `moduleHooks` is enabled (the default), mounting a VFS instance:
 
 1. **Patches `require()` and `import`** — On Node.js 23.5+ uses `Module.registerHooks()`. On older versions falls back to `Module._resolveFilename` + `Module._extensions` patching.
-2. **Patches core `fs` functions** — `readFileSync`, `statSync`, `lstatSync`, `readdirSync`, `existsSync`, `realpathSync`, `watch`, `watchFile`, `unwatchFile`, and the descriptor family `openSync`/`open`, `readSync`/`read`, `closeSync`/`close`, `fstatSync`/`fstat`.
+2. **Patches core `fs` functions** — in four groups:
+   - **sync reads and metadata** — `readFileSync`, `statSync`, `lstatSync`, `readdirSync`, `existsSync`,
+     `realpathSync`, `readlinkSync`, `accessSync`
+   - **callback forms** — `stat`, `lstat`, `readFile`, `readdir`, `realpath`, `readlink`, `access`,
+     `createReadStream`, `watch`, `watchFile`, `unwatchFile`
+   - **the descriptor family** — `openSync`/`open`, `readSync`/`read`, `closeSync`/`close`,
+     `fstatSync`/`fstat`, plus guards on the 22 other fd-taking members (see *Descriptor limits*)
+   - **`fs.promises`** — `access`, `readFile`, `stat`, `lstat`, `readdir`, `readlink`, `realpath`.
+     `fs.promises.open` is the one member left alone; see *Descriptor limits*.
 
 This means third-party code using `require()` or `fs.readFileSync()` will transparently pick up files from the VFS.
 
 Paths route the same whether they arrive as a string, a `Buffer` or a `file:` URL, and a relative path is
 resolved against the virtual cwd when the VFS was created with `virtualCwd: true`.
 
-`bigint: true` is refused with `ERR_INVALID_ARG_VALUE` by `statSync`, `lstatSync` and `fstatSync`: there is no
-`BigIntStats` shape here, and answering with Number fields would fail on the caller's first `stats.size > 0n`.
+`bigint: true` is answered by the provider when the provider can. `RealFSProvider` forwards to the real
+filesystem and returns genuine `BigIntStats`; `MemoryProvider` and `SqliteProvider` have no bigint shape, and
+a request they cannot answer is refused with `ERR_INVALID_ARG_VALUE` rather than served with Number fields
+that would fail on the caller's first `stats.size > 0n`. The rule applies to every stat entry point:
+`statSync`, `lstatSync`, `fstatSync`, `stat`, `lstat`, `fstat` and the `fs.promises` forms.
 
 ### Descriptor limits
 

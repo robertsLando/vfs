@@ -6,6 +6,9 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const { promisify } = require('node:util');
 const { pathToFileURL } = require('node:url');
+const { mkdtempSync, rmSync, writeFileSync } = require('node:fs');
+const { tmpdir } = require('node:os');
+const { join } = require('node:path');
 const { create, RealFSProvider } = require('../index.js');
 
 // These tests verify that the module hooks patch real fs/fs.promises methods
@@ -1050,6 +1053,50 @@ describe('Module hooks — fd family patches', () => {
         },
       );
     });
+  });
+
+  it('RealFSProvider reads the disk even when a VFS is mounted on its root', () => {
+    // the provider *is* the real filesystem: if its own fs calls went through the patched
+    // members they would re-enter the mount table that routes back to it
+    const root = mkdtempSync(join(tmpdir(), 'vfs-reentry-'));
+    try {
+      writeFileSync(join(root, 'real.txt'), 'REAL-DISK-CONTENT');
+
+      vfs = create(new RealFSProvider(root));
+      const shadow = create();
+      shadow.writeFileSync('/real.txt', 'SHADOW-FROM-MEMORY');
+      shadow.mount(root);
+      vfs.mount('/vfs-test-reentry');
+
+      try {
+        assert.strictEqual(
+          fs.readFileSync('/vfs-test-reentry/real.txt', 'utf8'),
+          'REAL-DISK-CONTENT',
+        );
+
+        const fd = fs.openSync('/vfs-test-reentry/real.txt');
+        const buffer = Buffer.alloc(17);
+        const bytesRead = fs.readSync(fd, buffer, 0, 17, 0);
+        fs.closeSync(fd);
+        assert.strictEqual(buffer.subarray(0, bytesRead).toString(), 'REAL-DISK-CONTENT');
+      } finally {
+        shadow.unmount();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('a provider mounted at its own root does not recurse', () => {
+    const root = mkdtempSync(join(tmpdir(), 'vfs-selfmount-'));
+    try {
+      writeFileSync(join(root, 'real.txt'), 'REAL-DISK-CONTENT');
+      vfs = create(new RealFSProvider(root));
+      vfs.mount(root);
+      assert.strictEqual(fs.readFileSync(join(root, 'real.txt'), 'utf8'), 'REAL-DISK-CONTENT');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('a provider that does answer bigint is not blocked', () => {
