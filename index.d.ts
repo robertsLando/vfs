@@ -40,6 +40,12 @@ export interface StatOptions {
   bigint?: boolean;
 }
 
+export interface ReadOptions {
+  offset?: number;
+  length?: number;
+  position?: number | bigint | null;
+}
+
 export class VirtualStats {
   dev: number;
   mode: number;
@@ -142,6 +148,8 @@ type Callback<T = void> = T extends void
   ? (err: NodeJS.ErrnoException | null) => void
   : (err: NodeJS.ErrnoException | null, result: T) => void;
 
+type ReadCallback = (err: NodeJS.ErrnoException | null, bytesRead: number, buffer: Buffer) => void;
+
 export class VirtualFileSystem {
   constructor(provider?: VirtualProvider, options?: VFSOptions);
   constructor(options?: VFSOptions);
@@ -190,7 +198,9 @@ export class VirtualFileSystem {
   // File descriptor operations
   openSync(filePath: string, flags?: string, mode?: number): number;
   closeSync(fd: number): void;
-  readSync(fd: number, buffer: Buffer, offset: number, length: number, position: number | null): number;
+  readSync(fd: number, buffer: Buffer, offset: number, length: number, position: number | bigint | null): number;
+  readSync(fd: number, buffer: Buffer, options?: ReadOptions): number;
+  readSync(fd: number, options?: ReadOptions & { buffer?: Buffer }): number;
   fstatSync(fd: number, options?: StatOptions): VirtualStats;
 
   // Callback operations
@@ -216,7 +226,11 @@ export class VirtualFileSystem {
   open(filePath: string, flags: string, callback: Callback<number>): void;
   open(filePath: string, flags: string, mode: number, callback: Callback<number>): void;
   close(fd: number, callback: Callback): void;
-  read(fd: number, buffer: Buffer, offset: number, length: number, position: number | null, callback: (err: NodeJS.ErrnoException | null, bytesRead: number, buffer: Buffer) => void): void;
+  read(fd: number, buffer: Buffer, offset: number, length: number, position: number | bigint | null, callback: ReadCallback): void;
+  read(fd: number, buffer: Buffer, options: ReadOptions, callback: ReadCallback): void;
+  read(fd: number, buffer: Buffer, callback: ReadCallback): void;
+  read(fd: number, options: ReadOptions & { buffer?: Buffer }, callback: ReadCallback): void;
+  read(fd: number, callback: ReadCallback): void;
   fstat(fd: number, callback: Callback<VirtualStats>): void;
   fstat(fd: number, options: StatOptions, callback: Callback<VirtualStats>): void;
 

@@ -557,9 +557,9 @@ describe('Module hooks — fd family patches', () => {
   });
 
   it('an overlay mount leaves non-VFS paths on the real fs', () => {
-    vfs = create();
+    vfs = create({ overlay: true });
     vfs.writeFileSync('/only-here.txt', 'vfs');
-    vfs.mount('/vfs-test-fd-overlay', { overlay: true });
+    vfs.mount('/vfs-test-fd-overlay');
 
     const fd = fs.openSync('/vfs-test-fd-overlay/only-here.txt');
     assert.strictEqual(fs.fstatSync(fd).size, 3);
@@ -569,5 +569,223 @@ describe('Module hooks — fd family patches', () => {
       () => fs.openSync('/vfs-test-fd-overlay/not-here.txt'),
       (err) => err.code === 'ENOENT',
     );
+  });
+
+  it('fs.readSync defaults length to the space left after offset', () => {
+    vfs = create();
+    vfs.writeFileSync('/off.txt', 'hello world');
+    vfs.mount('/vfs-test-fd-offset');
+
+    const fd = fs.openSync('/vfs-test-fd-offset/off.txt');
+    const buffer = Buffer.alloc(10);
+    const bytesRead = fs.readSync(fd, buffer, { offset: 4 });
+
+    // 6 bytes fit after the offset, so the position may only advance by 6
+    assert.strictEqual(bytesRead, 6);
+    assert.strictEqual(buffer.subarray(4, 10).toString(), 'hello ');
+    assert.strictEqual(fs.readSync(fd, Buffer.alloc(5), 0, 5, null), 5);
+    fs.closeSync(fd);
+  });
+
+  it('fs.readSync rejects an out-of-range offset or length', () => {
+    vfs = create();
+    vfs.writeFileSync('/range.txt', 'abcdef');
+    vfs.mount('/vfs-test-fd-range');
+
+    const fd = fs.openSync('/vfs-test-fd-range/range.txt');
+    assert.throws(
+      () => fs.readSync(fd, Buffer.alloc(4), 0, 100, 0),
+      (err) => err.code === 'ERR_OUT_OF_RANGE',
+    );
+    assert.throws(
+      () => fs.readSync(fd, Buffer.alloc(4), 9, 1, 0),
+      (err) => err.code === 'ERR_OUT_OF_RANGE',
+    );
+    fs.closeSync(fd);
+  });
+
+  it('a read past EOF returns the remaining bytes, then zero', () => {
+    vfs = create();
+    vfs.writeFileSync('/eof.txt', 'abc');
+    vfs.mount('/vfs-test-fd-eof');
+
+    const fd = fs.openSync('/vfs-test-fd-eof/eof.txt');
+    const buffer = Buffer.alloc(8);
+    assert.strictEqual(fs.readSync(fd, buffer, 0, 8, null), 3);
+    assert.strictEqual(fs.readSync(fd, buffer, 0, 8, null), 0);
+    assert.strictEqual(fs.readSync(fd, buffer, 0, 8, 3), 0);
+    fs.closeSync(fd);
+  });
+
+  it('fs.readSync accepts a bigint position', () => {
+    vfs = create();
+    vfs.writeFileSync('/big.txt', 'abcdef');
+    vfs.mount('/vfs-test-fd-bigint');
+
+    const fd = fs.openSync('/vfs-test-fd-bigint/big.txt');
+    const buffer = Buffer.alloc(3);
+    const bytesRead = fs.readSync(fd, buffer, 0, 3, 2n);
+    fs.closeSync(fd);
+
+    assert.strictEqual(bytesRead, 3);
+    assert.strictEqual(buffer.toString(), 'cde');
+  });
+
+  it('fs.fstatSync forwards its options argument', () => {
+    vfs = create();
+    vfs.writeFileSync('/statopts.txt', 'data');
+    vfs.mount('/vfs-test-fd-statopts');
+
+    const fd = fs.openSync('/vfs-test-fd-statopts/statopts.txt');
+    // the VFS does not implement bigint stats; what matters here is that options reach the handle
+    const stats = fs.fstatSync(fd, { bigint: true });
+    fs.closeSync(fd);
+
+    assert.ok(stats.isFile());
+    assert.strictEqual(stats.size, 4);
+  });
+
+  it('fs.read accepts the (fd, buffer, callback) overload', (_t, done) => {
+    vfs = create();
+    vfs.writeFileSync('/short.txt', 'abcdef');
+    vfs.mount('/vfs-test-fd-short');
+
+    const fd = fs.openSync('/vfs-test-fd-short/short.txt');
+    const buffer = Buffer.alloc(6);
+    fs.read(fd, buffer, (err, bytesRead, returned) => {
+      assert.ifError(err);
+      assert.strictEqual(bytesRead, 6);
+      assert.strictEqual(returned, buffer);
+      assert.strictEqual(buffer.toString(), 'abcdef');
+      fs.closeSync(fd);
+      done();
+    });
+  });
+
+  it('close, read and fstat call back with an fd-tagged EBADF on a stale fd', (_t, done) => {
+    vfs = create();
+    vfs.writeFileSync('/gone.txt', 'x');
+    vfs.mount('/vfs-test-fd-gone');
+
+    const fd = fs.openSync('/vfs-test-fd-gone/gone.txt');
+    fs.closeSync(fd);
+
+    vfs.close(fd, (closeErr) => {
+      assert.strictEqual(closeErr.code, 'EBADF');
+      assert.strictEqual(closeErr.fd, fd);
+      vfs.read(fd, Buffer.alloc(1), 0, 1, 0, (readErr, bytesRead, buffer) => {
+        assert.strictEqual(readErr.code, 'EBADF');
+        assert.strictEqual(bytesRead, 0);
+        assert.ok(Buffer.isBuffer(buffer));
+        vfs.fstat(fd, (fstatErr) => {
+          assert.strictEqual(fstatErr.code, 'EBADF');
+          assert.strictEqual(fstatErr.fd, fd);
+          done();
+        });
+      });
+    });
+  });
+
+  it('real-fd shorthand overloads still work while a VFS is mounted', (_t, done) => {
+    vfs = create();
+    vfs.writeFileSync('/unused.txt', 'x');
+    vfs.mount('/vfs-test-fd-arity');
+
+    // node picks these overloads from arguments.length, so the patches must forward it
+    fs.open(__filename, (openErr, fd) => {
+      assert.ifError(openErr);
+      assert.strictEqual(fs.readSync(fd, Buffer.alloc(4), { length: 4 }), 4);
+      fs.read(fd, (readErr, bytesRead) => {
+        assert.ifError(readErr);
+        assert.ok(bytesRead > 0);
+        fs.closeSync(fd);
+        done();
+      });
+    });
+  });
+
+  it('fd members the VFS does not route reject a virtual fd', () => {
+    vfs = create();
+    vfs.writeFileSync('/unrouted.txt', 'x');
+    vfs.mount('/vfs-test-fd-unrouted');
+
+    const fd = fs.openSync('/vfs-test-fd-unrouted/unrouted.txt');
+    assert.throws(() => fs.writeSync(fd, Buffer.from('y')), (err) => err.code === 'EBADF');
+    assert.throws(() => fs.ftruncateSync(fd, 0), (err) => err.code === 'EBADF');
+    assert.throws(() => fs.fsyncSync(fd), (err) => err.code === 'EBADF');
+    fs.closeSync(fd);
+  });
+
+  it('fs.fsync calls back with EBADF for a virtual fd', (_t, done) => {
+    vfs = create();
+    vfs.writeFileSync('/unrouted-cb.txt', 'x');
+    vfs.mount('/vfs-test-fd-unrouted-cb');
+
+    const fd = fs.openSync('/vfs-test-fd-unrouted-cb/unrouted-cb.txt');
+    fs.fsync(fd, (err) => {
+      assert.strictEqual(err.code, 'EBADF');
+      assert.strictEqual(err.fd, fd);
+      fs.closeSync(fd);
+      done();
+    });
+  });
+
+  it('fs.openSync accepts numeric open flags', () => {
+    vfs = create();
+    vfs.writeFileSync('/numeric.txt', 'abc');
+    vfs.mount('/vfs-test-fd-numeric');
+
+    const fd = fs.openSync('/vfs-test-fd-numeric/numeric.txt', fs.constants.O_RDONLY);
+    assert.strictEqual(fs.fstatSync(fd).size, 3);
+    fs.closeSync(fd);
+  });
+
+  it('write flags route to the VFS on a plain mount and fall through on an overlay', () => {
+    vfs = create();
+    vfs.writeFileSync('/exists.txt', 'x');
+    vfs.mount('/vfs-test-fd-write');
+
+    const fd = fs.openSync('/vfs-test-fd-write/created.txt', 'w');
+    fs.closeSync(fd);
+    assert.ok(vfs.existsSync('/vfs-test-fd-write/created.txt'));
+    vfs.unmount();
+
+    // an overlay mount leaves writes on the real fs, matching readFileSync and createReadStream
+    vfs = create({ overlay: true });
+    vfs.writeFileSync('/exists.txt', 'x');
+    vfs.mount('/vfs-test-fd-write-overlay');
+
+    assert.throws(
+      () => fs.openSync('/vfs-test-fd-write-overlay/created.txt', 'w'),
+      (err) => err.code === 'ENOENT',
+    );
+    assert.ok(!vfs.existsSync('/vfs-test-fd-write-overlay/created.txt'));
+  });
+
+  it('the fs patches serve real paths after unmount and route again on a second mount', () => {
+    vfs = create();
+    vfs.writeFileSync('/first.txt', 'first');
+    vfs.mount('/vfs-test-fd-isolation');
+
+    const first = fs.openSync('/vfs-test-fd-isolation/first.txt');
+    assert.strictEqual(fs.fstatSync(first).size, 5);
+    fs.closeSync(first);
+    vfs.unmount();
+
+    const realFd = fs.openSync(__filename, 'r');
+    assert.ok(fs.fstatSync(realFd).size > 0);
+    fs.closeSync(realFd);
+    assert.throws(
+      () => fs.openSync('/vfs-test-fd-isolation/first.txt'),
+      (err) => err.code === 'ENOENT',
+    );
+
+    vfs = create();
+    vfs.writeFileSync('/second.txt', 'second!');
+    vfs.mount('/vfs-test-fd-isolation-2');
+
+    const second = fs.openSync('/vfs-test-fd-isolation-2/second.txt');
+    assert.strictEqual(fs.fstatSync(second).size, 7);
+    fs.closeSync(second);
   });
 });

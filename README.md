@@ -256,6 +256,18 @@ When `moduleHooks` is enabled (the default), mounting a VFS instance:
 
 This means third-party code using `require()` or `fs.readFileSync()` will transparently pick up files from the VFS.
 
+### Descriptor limits
+
+Three things about the descriptor family are worth knowing before you rely on it:
+
+- **`fs.promises.open` is not patched.** It has to return a real `FileHandle`, which a virtual file cannot
+  supply, so it still throws `ENOENT` for a path inside a mount. Use `fs.openSync`/`fs.open`.
+- **Only `read`, `close` and `fstat` accept a virtual fd.** `fs.writeSync`, `writev`, `readv`, `ftruncate`,
+  `fsync`, `fdatasync`, `fchmod`, `fchown` and `futimes` reject one with `EBADF` rather than acting on an
+  unrelated file.
+- **Write flags are not routed by the mount.** `fs.openSync(path, 'w')` under an overlay mount falls through
+  to the real filesystem, the same way `readFileSync` and `createReadStream` already treat overlay paths.
+
 Module resolution supports package.json `exports`, `main`, and bare specifier resolution walking `node_modules`.
 
 ## Node.js core VFS support
