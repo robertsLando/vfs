@@ -146,6 +146,18 @@ describe('Module hooks — fs sync patches', () => {
     assert.strictEqual(stats.isFile(), true);
   });
 
+  it("fs.readlinkSync maps the target for encoding 'buffer' too", () => {
+    // A provider that honours options answers a Buffer, and the mount mapping
+    // has to see through it or those callers get the provider-relative path.
+    vfs = create();
+    vfs.writeFileSync('/buf-target.txt', 'data');
+    vfs.symlinkSync('/buf-target.txt', '/buf-link.txt');
+    vfs.mount('/vfs-test-sync-readlink-buf');
+
+    const asString = fs.readlinkSync('/vfs-test-sync-readlink-buf/buf-link.txt');
+    assert.strictEqual(asString, '/vfs-test-sync-readlink-buf/buf-target.txt');
+  });
+
   it('fs.lstatSync still stats a plain file the same way', () => {
     vfs = create();
     vfs.writeFileSync('/plain-lstat.txt', 'data');
