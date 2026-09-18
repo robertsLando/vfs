@@ -67,6 +67,34 @@ test('fd operations', () => {
   expect(vfs.fstatSync(3)).type.toBe<VirtualStats>();
 });
 
+test('readSync accepts every overload the patches support', () => {
+  const vfs = create();
+  const buffer = Buffer.alloc(8);
+  expect(vfs.readSync(3, buffer, 0, 8, null)).type.toBe<number>();
+  expect(vfs.readSync(3, buffer, 0, 8, 2n)).type.toBe<number>();
+  expect(vfs.readSync(3, buffer, { offset: 0, length: 8 })).type.toBe<number>();
+  expect(vfs.readSync(3, buffer)).type.toBe<number>();
+  expect(vfs.readSync(3, { length: 8 })).type.toBe<number>();
+});
+
+test('close and fstat callbacks', () => {
+  const vfs = create();
+  expect(vfs.close(3)).type.toBe<void>();
+  expect(vfs.close(3, (_err: NodeJS.ErrnoException | null) => {})).type.toBe<void>();
+  expect(vfs.fstat(3, (_err: NodeJS.ErrnoException | null, _stats: VirtualStats) => {})).type.toBe<void>();
+});
+
+test('read accepts every callback overload', () => {
+  const vfs = create();
+  const buffer = Buffer.alloc(8);
+  const cb = (_err: NodeJS.ErrnoException | null, _bytesRead: number, _buffer: Buffer) => {};
+  expect(vfs.read(3, buffer, 0, 8, null, cb)).type.toBe<void>();
+  expect(vfs.read(3, buffer, { position: 2 }, cb)).type.toBe<void>();
+  expect(vfs.read(3, buffer, cb)).type.toBe<void>();
+  expect(vfs.read(3, { buffer }, cb)).type.toBe<void>();
+  expect(vfs.read(3, cb)).type.toBe<void>();
+});
+
 // mount / unmount
 test('mount returns this', () => {
   const vfs = create();
