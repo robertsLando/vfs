@@ -1087,6 +1087,44 @@ describe('Module hooks — fd family patches', () => {
     }
   });
 
+  it('RealFSProvider async methods reach the disk while a VFS is mounted', async () => {
+    // the async half goes through fs.promises.*, which installFsPatches replaces in place
+    const root = mkdtempSync(join(tmpdir(), 'vfs-reentry-async-'));
+    try {
+      writeFileSync(join(root, 'real.txt'), 'REAL-DISK-CONTENT');
+
+      vfs = create(new RealFSProvider(root));
+      vfs.mount('/vfs-test-reentry-async');
+      const provider = vfs.provider;
+
+      assert.strictEqual((await provider.stat('/real.txt')).size, 17);
+      assert.strictEqual((await provider.lstat('/real.txt')).size, 17);
+      assert.deepStrictEqual(await provider.readdir('/'), ['real.txt']);
+      assert.strictEqual(String(await provider.readFile('/real.txt')), 'REAL-DISK-CONTENT');
+      await provider.access('/real.txt');
+      assert.match(await provider.realpath('/real.txt'), /real\.txt$/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('vfs.promises.stat applies the same bigint rule as its sync sibling', async () => {
+    vfs = create();
+    vfs.writeFileSync('/pstat.txt', 'data');
+    vfs.mount('/vfs-test-promises-bigint');
+
+    await assert.rejects(
+      vfs.promises.stat('/vfs-test-promises-bigint/pstat.txt', { bigint: true }),
+      (err) => err.code === 'ERR_INVALID_ARG_VALUE',
+    );
+    await assert.rejects(
+      vfs.promises.lstat('/vfs-test-promises-bigint/pstat.txt', { bigint: true }),
+      (err) => err.code === 'ERR_INVALID_ARG_VALUE',
+    );
+    assert.strictEqual(
+      (await vfs.promises.stat('/vfs-test-promises-bigint/pstat.txt')).size, 4);
+  });
+
   it('a provider mounted at its own root does not recurse', () => {
     const root = mkdtempSync(join(tmpdir(), 'vfs-selfmount-'));
     try {
