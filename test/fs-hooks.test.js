@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const { promisify } = require('node:util');
 const { pathToFileURL } = require('node:url');
-const { create } = require('../index.js');
+const { create, RealFSProvider } = require('../index.js');
 
 // These tests verify that the module hooks patch real fs/fs.promises methods
 // so that require('fs').readFileSync, require('fs/promises').readFile, etc.
@@ -1012,6 +1012,50 @@ describe('Module hooks — fd family patches', () => {
       assert.strictEqual(err.code, 'ERR_INVALID_ARG_VALUE');
       done();
     });
+  });
+
+  it('fs.open rejects a missing callback synchronously', () => {
+    vfs = create();
+    vfs.writeFileSync('/opencb.txt', 'x');
+    vfs.mount('/vfs-test-fd-opencb');
+
+    assert.throws(
+      () => fs.open('/vfs-test-fd-opencb/opencb.txt'),
+      (err) => err.code === 'ERR_INVALID_ARG_TYPE',
+    );
+  });
+
+  it('every stat route agrees on bigint, and a provider that answers it still works', (_t, done) => {
+    vfs = create();
+    vfs.writeFileSync('/bigstat.txt', 'data');
+    vfs.mount('/vfs-test-fd-bigstat-routes');
+    const p = '/vfs-test-fd-bigstat-routes/bigstat.txt';
+
+    // the memory provider has no bigint shape, so every route must refuse rather than
+    // hand back Number fields from one and throw from another
+    assert.throws(() => fs.statSync(p, { bigint: true }), (err) => err.code === 'ERR_INVALID_ARG_VALUE');
+    assert.throws(() => fs.lstatSync(p, { bigint: true }), (err) => err.code === 'ERR_INVALID_ARG_VALUE');
+
+    const fd = fs.openSync(p);
+    assert.throws(() => fs.fstatSync(fd, { bigint: true }), (err) => err.code === 'ERR_INVALID_ARG_VALUE');
+    fs.closeSync(fd);
+
+    fs.stat(p, { bigint: true }, (statErr) => {
+      assert.strictEqual(statErr.code, 'ERR_INVALID_ARG_VALUE');
+      fs.promises.stat(p, { bigint: true }).then(
+        () => assert.fail('promises.stat should refuse bigint here'),
+        (err) => {
+          assert.strictEqual(err.code, 'ERR_INVALID_ARG_VALUE');
+          done();
+        },
+      );
+    });
+  });
+
+  it('a provider that does answer bigint is not blocked', () => {
+    const real = create(new RealFSProvider(process.cwd()), { moduleHooks: false });
+    assert.strictEqual(typeof real.statSync('/package.json', { bigint: true }).size, 'bigint');
+    assert.strictEqual(typeof real.statSync('/package.json').size, 'number');
   });
 
   it('an unrouted fd member with no callback throws instead of dispatching', () => {

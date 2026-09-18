@@ -172,6 +172,7 @@ export class VirtualFileSystem {
   [Symbol.dispose](): void;
 
   shouldHandle(inputPath: string): boolean;
+  probeSync(filePath: string): { exists: boolean; error?: NodeJS.ErrnoException };
 
   // Sync operations
   existsSync(filePath: string): boolean;
