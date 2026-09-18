@@ -77,6 +77,13 @@ test('readSync accepts every overload the patches support', () => {
   expect(vfs.readSync(3, { length: 8 })).type.toBe<number>();
 });
 
+test('close and fstat callbacks', () => {
+  const vfs = create();
+  expect(vfs.close(3)).type.toBe<void>();
+  expect(vfs.close(3, (_err: NodeJS.ErrnoException | null) => {})).type.toBe<void>();
+  expect(vfs.fstat(3, (_err: NodeJS.ErrnoException | null, _stats: VirtualStats) => {})).type.toBe<void>();
+});
+
 test('read accepts every callback overload', () => {
   const vfs = create();
   const buffer = Buffer.alloc(8);

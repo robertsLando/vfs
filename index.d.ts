@@ -225,7 +225,7 @@ export class VirtualFileSystem {
   open(filePath: string, callback: Callback<number>): void;
   open(filePath: string, flags: string, callback: Callback<number>): void;
   open(filePath: string, flags: string, mode: number, callback: Callback<number>): void;
-  close(fd: number, callback: Callback): void;
+  close(fd: number, callback?: Callback): void;
   read(fd: number, buffer: Buffer, offset: number, length: number, position: number | bigint | null, callback: ReadCallback): void;
   read(fd: number, buffer: Buffer, options: ReadOptions, callback: ReadCallback): void;
   read(fd: number, buffer: Buffer, callback: ReadCallback): void;
