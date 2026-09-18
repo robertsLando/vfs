@@ -179,6 +179,40 @@ describe('Module hooks — fs sync patches', () => {
     assert.strictEqual(asString, '/vfs-test-sync-readlink-buf/buf-target.txt');
   });
 
+  it('re-raises the provider error the gate hit, not a bare ENOENT', () => {
+    // The module hooks probe with existsSync before the real call. A provider
+    // that fails that probe for a reason worth reporting would otherwise have
+    // it flattened into "not found" — which is how a symlink cycle reads as
+    // ENOENT instead of ELOOP.
+    vfs = create();
+    vfs.writeFileSync('/probe-boom.txt', 'data');
+    vfs.mount('/vfs-test-probe-reraise');
+
+    const provider = vfs.provider ?? vfs[Object.getOwnPropertySymbols(vfs).find(
+      (sym) => String(sym).includes('provider'),
+    )];
+    const original = provider.existsSync.bind(provider);
+    provider.existsSync = () => {
+      const err = new Error('ELOOP: too many symbolic links encountered');
+      err.code = 'ELOOP';
+      throw err;
+    };
+
+    try {
+      assert.throws(
+        () => fs.statSync('/vfs-test-probe-reraise/probe-boom.txt'),
+        { code: 'ELOOP' },
+      );
+      // fs.existsSync itself still has to answer false rather than throw.
+      assert.strictEqual(
+        fs.existsSync('/vfs-test-probe-reraise/probe-boom.txt'),
+        false,
+      );
+    } finally {
+      provider.existsSync = original;
+    }
+  });
+
   it('fs.lstatSync still stats a plain file the same way', () => {
     vfs = create();
     vfs.writeFileSync('/plain-lstat.txt', 'data');
