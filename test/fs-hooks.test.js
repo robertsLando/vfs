@@ -4,7 +4,12 @@ const { describe, it, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
-const { create } = require('../index.js');
+const { promisify } = require('node:util');
+const { pathToFileURL } = require('node:url');
+const { mkdtempSync, rmSync, writeFileSync } = require('node:fs');
+const { tmpdir } = require('node:os');
+const { join } = require('node:path');
+const { create, RealFSProvider } = require('../index.js');
 
 // These tests verify that the module hooks patch real fs/fs.promises methods
 // so that require('fs').readFileSync, require('fs/promises').readFile, etc.
@@ -99,6 +104,172 @@ describe('Module hooks — fs sync patches', () => {
 
     const target = fs.readlinkSync('/vfs-test-sync-readlink/my-link.txt');
     assert.strictEqual(target, '/vfs-test-sync-readlink/link-target.txt');
+  });
+
+  it('fs.lstatSync and fs.readlinkSync see a dangling symlink', () => {
+    // existsSync follows the link, so pre-checking with it hides exactly the case
+    // lstat and readlink exist for
+    vfs = create();
+    vfs.symlinkSync('/nowhere.txt', '/dangling.txt');
+    vfs.mount('/vfs-test-sync-dangling');
+
+    const stats = fs.lstatSync('/vfs-test-sync-dangling/dangling.txt');
+    assert.ok(stats.isSymbolicLink());
+    assert.strictEqual(
+      fs.readlinkSync('/vfs-test-sync-dangling/dangling.txt'),
+      '/vfs-test-sync-dangling/nowhere.txt',
+    );
+    assert.throws(
+      () => fs.statSync('/vfs-test-sync-dangling/dangling.txt'),
+      (err) => err.code === 'ENOENT',
+    );
+  });
+
+  it('fs.readlinkSync raises EINVAL for a path that is not a link', () => {
+    // Answering readlink through realpathSync could not tell a link from an
+    // ordinary file, so every existing path looked like a self-pointing link.
+    vfs = create();
+    vfs.writeFileSync('/plain.txt', 'data');
+    vfs.mount('/vfs-test-sync-readlink-einval');
+
+    assert.throws(
+      () => fs.readlinkSync('/vfs-test-sync-readlink-einval/plain.txt'),
+      { code: 'EINVAL' },
+    );
+  });
+
+  it('fs.readlinkSync returns a relative link body verbatim', () => {
+    // POSIX readlink answers the link body; only an absolute target names a
+    // provider path that has to be mapped into the mounted namespace.
+    vfs = create();
+    vfs.mkdirSync('/dir', { recursive: true });
+    vfs.writeFileSync('/dir/target.txt', 'data');
+    vfs.symlinkSync('./target.txt', '/dir/rel-link.txt');
+    vfs.mount('/vfs-test-sync-readlink-rel');
+
+    assert.strictEqual(
+      fs.readlinkSync('/vfs-test-sync-readlink-rel/dir/rel-link.txt'),
+      './target.txt',
+    );
+  });
+
+  it('fs.lstatSync describes the link, not its target', () => {
+    // lstat used to share findVFSForFsStat, which calls statSync and so
+    // followed the link — isSymbolicLink() was never true inside a VFS.
+    vfs = create();
+    vfs.writeFileSync('/lstat-target.txt', 'data');
+    vfs.symlinkSync('/lstat-target.txt', '/lstat-link.txt');
+    vfs.mount('/vfs-test-sync-lstat');
+
+    const lstats = fs.lstatSync('/vfs-test-sync-lstat/lstat-link.txt');
+    assert.strictEqual(lstats.isSymbolicLink(), true);
+    assert.strictEqual(lstats.isFile(), false);
+
+    const stats = fs.statSync('/vfs-test-sync-lstat/lstat-link.txt');
+    assert.strictEqual(stats.isSymbolicLink(), false);
+    assert.strictEqual(stats.isFile(), true);
+  });
+
+  it("fs.readlinkSync maps the target for encoding 'buffer' too", () => {
+    // A provider that honours options answers a Buffer, and the mount mapping
+    // has to see through it or those callers get the provider-relative path.
+    vfs = create();
+    vfs.writeFileSync('/buf-target.txt', 'data');
+    vfs.symlinkSync('/buf-target.txt', '/buf-link.txt');
+    vfs.mount('/vfs-test-sync-readlink-buf');
+
+    const asString = fs.readlinkSync('/vfs-test-sync-readlink-buf/buf-link.txt');
+    assert.strictEqual(asString, '/vfs-test-sync-readlink-buf/buf-target.txt');
+  });
+
+  it('re-raises the provider error the gate hit, not a bare ENOENT', () => {
+    // The module hooks probe with existsSync before the real call. A provider
+    // that fails that probe for a reason worth reporting would otherwise have
+    // it flattened into "not found" — which is how a symlink cycle reads as
+    // ENOENT instead of ELOOP.
+    vfs = create();
+    vfs.writeFileSync('/probe-boom.txt', 'data');
+    vfs.mount('/vfs-test-probe-reraise');
+
+    const provider = vfs.provider ?? vfs[Object.getOwnPropertySymbols(vfs).find(
+      (sym) => String(sym).includes('provider'),
+    )];
+    const original = provider.existsSync.bind(provider);
+    provider.existsSync = () => {
+      const err = new Error('ELOOP: too many symbolic links encountered');
+      err.code = 'ELOOP';
+      throw err;
+    };
+
+    try {
+      assert.throws(
+        () => fs.statSync('/vfs-test-probe-reraise/probe-boom.txt'),
+        { code: 'ELOOP' },
+      );
+      // fs.existsSync itself still has to answer false rather than throw.
+      assert.strictEqual(
+        fs.existsSync('/vfs-test-probe-reraise/probe-boom.txt'),
+        false,
+      );
+    } finally {
+      provider.existsSync = original;
+    }
+  });
+
+  it('fs.lstatSync still stats a plain file the same way', () => {
+    vfs = create();
+    vfs.writeFileSync('/plain-lstat.txt', 'data');
+    vfs.mount('/vfs-test-sync-lstat-plain');
+
+    const stats = fs.lstatSync('/vfs-test-sync-lstat-plain/plain-lstat.txt');
+    assert.strictEqual(stats.isFile(), true);
+    assert.strictEqual(stats.isSymbolicLink(), false);
+  });
+});
+
+describe('Module hooks — path forms', () => {
+  let vfs;
+
+  afterEach(() => {
+    if (vfs?.mounted) {
+      vfs.unmount();
+    }
+  });
+
+  it('routes Buffer and file: URL paths like the string form', () => {
+    vfs = create();
+    vfs.writeFileSync('/conf.json', 'VFS COPY');
+    vfs.mount('/vfs-test-path-forms');
+
+    const asString = '/vfs-test-path-forms/conf.json';
+    assert.strictEqual(fs.readFileSync(asString, 'utf8'), 'VFS COPY');
+    assert.strictEqual(fs.readFileSync(Buffer.from(asString), 'utf8'), 'VFS COPY');
+    assert.strictEqual(fs.readFileSync(pathToFileURL(asString), 'utf8'), 'VFS COPY');
+
+    const fd = fs.openSync(Buffer.from(asString));
+    assert.strictEqual(fs.fstatSync(fd).size, 8);
+    fs.closeSync(fd);
+  });
+
+  it('resolves a relative path against the virtual cwd', () => {
+    vfs = create({ virtualCwd: true });
+    vfs.mkdirSync('/app');
+    vfs.writeFileSync('/app/package.json', '{"name":"virtual"}');
+    vfs.mount('/vfs-test-path-relative');
+
+    const realCwd = process.cwd();
+    try {
+      process.chdir('/vfs-test-path-relative/app');
+      assert.strictEqual(process.cwd(), '/vfs-test-path-relative/app');
+      // without resolving against the virtual cwd this reads the real file next to the process
+      assert.strictEqual(fs.readFileSync('package.json', 'utf8'), '{"name":"virtual"}');
+      const fd = fs.openSync('package.json');
+      assert.strictEqual(fs.fstatSync(fd).size, 18);
+      fs.closeSync(fd);
+    } finally {
+      vfs.unmount();
+      process.chdir(realCwd);
+    }
   });
 });
 
@@ -347,5 +518,754 @@ describe('Module hooks — fs.promises patches', () => {
     const content2 = await fsp.readFile('/vfs-test-p-shared/shared.txt', 'utf8');
     assert.strictEqual(content1, 'shared content');
     assert.strictEqual(content2, 'shared content');
+  });
+});
+
+describe('Module hooks — fd family patches', () => {
+  let vfs;
+
+  afterEach(() => {
+    if (vfs?.mounted) {
+      vfs.unmount();
+    }
+  });
+
+  it('fs.openSync + fs.readSync + fs.closeSync read a VFS file', () => {
+    vfs = create();
+    vfs.writeFileSync('/fd.txt', 'hello from vfs');
+    vfs.mount('/vfs-test-fd-sync');
+
+    const fd = fs.openSync('/vfs-test-fd-sync/fd.txt');
+    const buffer = Buffer.alloc(5);
+    const bytesRead = fs.readSync(fd, buffer, 0, 5, 0);
+    fs.closeSync(fd);
+
+    assert.strictEqual(bytesRead, 5);
+    assert.strictEqual(buffer.toString(), 'hello');
+  });
+
+  it('fs.openSync throws ENOENT for a missing VFS file', () => {
+    vfs = create();
+    vfs.writeFileSync('/present.txt', 'x');
+    vfs.mount('/vfs-test-fd-missing');
+
+    assert.throws(
+      () => fs.openSync('/vfs-test-fd-missing/absent.txt'),
+      (err) => err.code === 'ENOENT',
+    );
+  });
+
+  it('fs.readSync accepts the options-object overload', () => {
+    vfs = create();
+    vfs.writeFileSync('/opts.txt', 'abcdefgh');
+    vfs.mount('/vfs-test-fd-opts');
+
+    const fd = fs.openSync('/vfs-test-fd-opts/opts.txt');
+    const buffer = Buffer.alloc(3);
+    const bytesRead = fs.readSync(fd, buffer, { offset: 0, length: 3, position: 2 });
+    fs.closeSync(fd);
+
+    assert.strictEqual(bytesRead, 3);
+    assert.strictEqual(buffer.toString(), 'cde');
+  });
+
+  it('fs.fstatSync returns stats for a VFS fd', () => {
+    vfs = create();
+    vfs.writeFileSync('/stat-fd.txt', 'data');
+    vfs.mount('/vfs-test-fd-fstat');
+
+    const fd = fs.openSync('/vfs-test-fd-fstat/stat-fd.txt');
+    const stats = fs.fstatSync(fd);
+    fs.closeSync(fd);
+
+    assert.ok(stats.isFile());
+    assert.strictEqual(stats.size, 4);
+  });
+
+  it('sequential fs.readSync calls advance the file position', () => {
+    vfs = create();
+    vfs.writeFileSync('/seq.txt', 'abcdef');
+    vfs.mount('/vfs-test-fd-seq');
+
+    const fd = fs.openSync('/vfs-test-fd-seq/seq.txt');
+    const first = Buffer.alloc(3);
+    const second = Buffer.alloc(3);
+    fs.readSync(fd, first, 0, 3, null);
+    fs.readSync(fd, second, 0, 3, null);
+    fs.closeSync(fd);
+
+    assert.strictEqual(first.toString(), 'abc');
+    assert.strictEqual(second.toString(), 'def');
+  });
+
+  it('fs.closeSync on a stale VFS fd throws EBADF', () => {
+    vfs = create();
+    vfs.writeFileSync('/stale.txt', 'x');
+    vfs.mount('/vfs-test-fd-stale');
+
+    const fd = fs.openSync('/vfs-test-fd-stale/stale.txt');
+    fs.closeSync(fd);
+
+    assert.throws(() => fs.closeSync(fd), (err) => err.code === 'EBADF');
+  });
+
+  it('fs.open + fs.read + fs.close read a VFS file', (_t, done) => {
+    vfs = create();
+    vfs.writeFileSync('/cb.txt', 'callback content');
+    vfs.mount('/vfs-test-fd-cb');
+
+    fs.open('/vfs-test-fd-cb/cb.txt', 'r', (openErr, fd) => {
+      assert.ifError(openErr);
+      const buffer = Buffer.alloc(8);
+      fs.read(fd, buffer, 0, 8, 0, (readErr, bytesRead) => {
+        assert.ifError(readErr);
+        assert.strictEqual(bytesRead, 8);
+        assert.strictEqual(buffer.toString(), 'callback');
+        fs.close(fd, (closeErr) => {
+          assert.ifError(closeErr);
+          done();
+        });
+      });
+    });
+  });
+
+  it('fs.fstat returns stats for a VFS fd', (_t, done) => {
+    vfs = create();
+    vfs.writeFileSync('/fstat-cb.txt', 'seven..');
+    vfs.mount('/vfs-test-fd-fstat-cb');
+
+    const fd = fs.openSync('/vfs-test-fd-fstat-cb/fstat-cb.txt');
+    fs.fstat(fd, (err, stats) => {
+      assert.ifError(err);
+      assert.ok(stats.isFile());
+      assert.strictEqual(stats.size, 7);
+      fs.closeSync(fd);
+      done();
+    });
+  });
+
+  it('real-fs descriptors still work while a VFS is mounted', () => {
+    vfs = create();
+    vfs.writeFileSync('/unused.txt', 'x');
+    vfs.mount('/vfs-test-fd-passthrough');
+
+    const fd = fs.openSync(__filename, 'r');
+    const buffer = Buffer.alloc(12);
+    const bytesRead = fs.readSync(fd, buffer, 0, 12, 0);
+    const stats = fs.fstatSync(fd);
+    fs.closeSync(fd);
+
+    assert.strictEqual(bytesRead, 12);
+    assert.strictEqual(buffer.toString(), "'use strict'");
+    assert.ok(stats.size > 0);
+  });
+
+  it('an overlay mount leaves non-VFS paths on the real fs', () => {
+    vfs = create({ overlay: true });
+    vfs.writeFileSync('/only-here.txt', 'vfs');
+    vfs.mount('/vfs-test-fd-overlay');
+
+    const fd = fs.openSync('/vfs-test-fd-overlay/only-here.txt');
+    assert.strictEqual(fs.fstatSync(fd).size, 3);
+    fs.closeSync(fd);
+
+    assert.throws(
+      () => fs.openSync('/vfs-test-fd-overlay/not-here.txt'),
+      (err) => err.code === 'ENOENT',
+    );
+  });
+
+  it('fs.readSync defaults length to the space left after offset', () => {
+    vfs = create();
+    vfs.writeFileSync('/off.txt', 'hello world');
+    vfs.mount('/vfs-test-fd-offset');
+
+    const fd = fs.openSync('/vfs-test-fd-offset/off.txt');
+    const buffer = Buffer.alloc(10);
+    const bytesRead = fs.readSync(fd, buffer, { offset: 4 });
+
+    // 6 bytes fit after the offset, so the position may only advance by 6
+    assert.strictEqual(bytesRead, 6);
+    assert.strictEqual(buffer.subarray(4, 10).toString(), 'hello ');
+    assert.strictEqual(fs.readSync(fd, Buffer.alloc(5), 0, 5, null), 5);
+    fs.closeSync(fd);
+  });
+
+  it('fs.readSync rejects an out-of-range offset or length', () => {
+    vfs = create();
+    vfs.writeFileSync('/range.txt', 'abcdef');
+    vfs.mount('/vfs-test-fd-range');
+
+    const fd = fs.openSync('/vfs-test-fd-range/range.txt');
+    assert.throws(
+      () => fs.readSync(fd, Buffer.alloc(4), 0, 100, 0),
+      (err) => err.code === 'ERR_OUT_OF_RANGE',
+    );
+    assert.throws(
+      () => fs.readSync(fd, Buffer.alloc(4), 9, 1, 0),
+      (err) => err.code === 'ERR_OUT_OF_RANGE',
+    );
+    fs.closeSync(fd);
+  });
+
+  it('a read past EOF returns the remaining bytes, then zero', () => {
+    vfs = create();
+    vfs.writeFileSync('/eof.txt', 'abc');
+    vfs.mount('/vfs-test-fd-eof');
+
+    const fd = fs.openSync('/vfs-test-fd-eof/eof.txt');
+    const buffer = Buffer.alloc(8);
+    assert.strictEqual(fs.readSync(fd, buffer, 0, 8, null), 3);
+    assert.strictEqual(fs.readSync(fd, buffer, 0, 8, null), 0);
+    assert.strictEqual(fs.readSync(fd, buffer, 0, 8, 3), 0);
+    fs.closeSync(fd);
+  });
+
+  it('fs.readSync accepts a bigint position', () => {
+    vfs = create();
+    vfs.writeFileSync('/big.txt', 'abcdef');
+    vfs.mount('/vfs-test-fd-bigint');
+
+    const fd = fs.openSync('/vfs-test-fd-bigint/big.txt');
+    const buffer = Buffer.alloc(3);
+    const bytesRead = fs.readSync(fd, buffer, 0, 3, 2n);
+    fs.closeSync(fd);
+
+    assert.strictEqual(bytesRead, 3);
+    assert.strictEqual(buffer.toString(), 'cde');
+  });
+
+  it('stat options reach the handle, and bigint is refused rather than mistyped', (_t, done) => {
+    vfs = create();
+    vfs.writeFileSync('/statopts.txt', 'data');
+    vfs.mount('/vfs-test-fd-statopts');
+
+    const fd = fs.openSync('/vfs-test-fd-statopts/statopts.txt');
+    const stats = fs.fstatSync(fd, {});
+    assert.ok(stats.isFile());
+    assert.strictEqual(stats.size, 4);
+
+    // there is no BigIntStats shape here; answering with Number fields would break the
+    // caller's first `stats.size > 0n`
+    assert.throws(
+      () => fs.fstatSync(fd, { bigint: true }),
+      (err) => err.code === 'ERR_INVALID_ARG_VALUE',
+    );
+    assert.throws(
+      () => fs.statSync('/vfs-test-fd-statopts/statopts.txt', { bigint: true }),
+      (err) => err.code === 'ERR_INVALID_ARG_VALUE',
+    );
+    fs.fstat(fd, { bigint: true }, (err) => {
+      assert.strictEqual(err.code, 'ERR_INVALID_ARG_VALUE');
+      fs.closeSync(fd);
+      done();
+    });
+  });
+
+  it('fs.read accepts the (fd, buffer, callback) overload', (_t, done) => {
+    vfs = create();
+    vfs.writeFileSync('/short.txt', 'abcdef');
+    vfs.mount('/vfs-test-fd-short');
+
+    const fd = fs.openSync('/vfs-test-fd-short/short.txt');
+    const buffer = Buffer.alloc(6);
+    fs.read(fd, buffer, (err, bytesRead, returned) => {
+      assert.ifError(err);
+      assert.strictEqual(bytesRead, 6);
+      assert.strictEqual(returned, buffer);
+      assert.strictEqual(buffer.toString(), 'abcdef');
+      fs.closeSync(fd);
+      done();
+    });
+  });
+
+  it('close, read and fstat call back with an fd-tagged EBADF on a stale fd', (_t, done) => {
+    vfs = create();
+    vfs.writeFileSync('/gone.txt', 'x');
+    vfs.mount('/vfs-test-fd-gone');
+
+    const fd = fs.openSync('/vfs-test-fd-gone/gone.txt');
+    fs.closeSync(fd);
+
+    vfs.close(fd, (closeErr) => {
+      assert.strictEqual(closeErr.code, 'EBADF');
+      assert.strictEqual(closeErr.fd, fd);
+      vfs.read(fd, Buffer.alloc(1), 0, 1, 0, (readErr, bytesRead, buffer) => {
+        assert.strictEqual(readErr.code, 'EBADF');
+        assert.strictEqual(bytesRead, 0);
+        assert.ok(Buffer.isBuffer(buffer));
+        vfs.fstat(fd, (fstatErr) => {
+          assert.strictEqual(fstatErr.code, 'EBADF');
+          assert.strictEqual(fstatErr.fd, fd);
+          done();
+        });
+      });
+    });
+  });
+
+  it('overlapping fs.close on a VFS fd refuses all but one, as it does on a real fd', (_t, done) => {
+    vfs = create();
+    vfs.writeFileSync('/race.txt', 'x');
+    vfs.mount('/vfs-test-fd-race');
+
+    const fd = fs.openSync('/vfs-test-fd-race/race.txt');
+    const results = [];
+    const collect = (err) => {
+      results.push(err ? err.code : 'ok');
+      if (results.length < 2) {
+        return;
+      }
+      assert.deepStrictEqual(results.sort(), ['EBADF', 'ok']);
+      done();
+    };
+
+    fs.close(fd, collect);
+    fs.close(fd, collect);
+  });
+
+  it('a close in flight holds its fd number, so a new open cannot take it', (_t, done) => {
+    vfs = create();
+    vfs.writeFileSync('/held.txt', 'held');
+    vfs.writeFileSync('/other.txt', 'other');
+    vfs.mount('/vfs-test-fd-held');
+
+    const fd = fs.openSync('/vfs-test-fd-held/held.txt');
+    fs.close(fd, (err) => {
+      assert.ifError(err);
+      fs.closeSync(other);
+      done();
+    });
+
+    // opened while the close above is still pending
+    const other = fs.openSync('/vfs-test-fd-held/other.txt');
+    assert.notStrictEqual(other, fd);
+    assert.strictEqual(fs.readFileSync('/vfs-test-fd-held/other.txt', 'utf8'), 'other');
+  });
+
+  it('fs.read and fs.fstat on an fd whose close is in flight fail with EBADF', (_t, done) => {
+    vfs = create();
+    vfs.writeFileSync('/inflight.txt', 'abc');
+    vfs.mount('/vfs-test-fd-inflight');
+
+    const fd = fs.openSync('/vfs-test-fd-inflight/inflight.txt');
+    fs.close(fd, (err) => {
+      assert.ifError(err);
+      done();
+    });
+
+    assert.throws(() => fs.readSync(fd, Buffer.alloc(1), 0, 1, 0), (err) => err.code === 'EBADF');
+    assert.throws(() => fs.fstatSync(fd), (err) => err.code === 'EBADF');
+  });
+
+  it('real-fd shorthand overloads still work while a VFS is mounted', (_t, done) => {
+    vfs = create();
+    vfs.writeFileSync('/unused.txt', 'x');
+    vfs.mount('/vfs-test-fd-arity');
+
+    // node picks these overloads from arguments.length, so the patches must forward it
+    fs.open(__filename, (openErr, fd) => {
+      assert.ifError(openErr);
+      assert.strictEqual(fs.readSync(fd, Buffer.alloc(4), { length: 4 }), 4);
+      fs.read(fd, (readErr, bytesRead) => {
+        assert.ifError(readErr);
+        assert.ok(bytesRead > 0);
+        fs.closeSync(fd);
+        done();
+      });
+    });
+  });
+
+  it('fd members the VFS does not route reject a virtual fd', () => {
+    vfs = create();
+    vfs.writeFileSync('/unrouted.txt', 'x');
+    vfs.mount('/vfs-test-fd-unrouted');
+
+    const fd = fs.openSync('/vfs-test-fd-unrouted/unrouted.txt');
+    assert.throws(() => fs.writeSync(fd, Buffer.from('y')), (err) => err.code === 'EBADF');
+    assert.throws(() => fs.ftruncateSync(fd, 0), (err) => err.code === 'EBADF');
+    assert.throws(() => fs.fsyncSync(fd), (err) => err.code === 'EBADF');
+    fs.closeSync(fd);
+  });
+
+  it('fs.fsync calls back with EBADF for a virtual fd', (_t, done) => {
+    vfs = create();
+    vfs.writeFileSync('/unrouted-cb.txt', 'x');
+    vfs.mount('/vfs-test-fd-unrouted-cb');
+
+    const fd = fs.openSync('/vfs-test-fd-unrouted-cb/unrouted-cb.txt');
+    fs.fsync(fd, (err) => {
+      assert.strictEqual(err.code, 'EBADF');
+      assert.strictEqual(err.fd, fd);
+      fs.closeSync(fd);
+      done();
+    });
+  });
+
+  it('fs.openSync accepts numeric open flags', () => {
+    vfs = create();
+    vfs.writeFileSync('/numeric.txt', 'abc');
+    vfs.mount('/vfs-test-fd-numeric');
+
+    const fd = fs.openSync('/vfs-test-fd-numeric/numeric.txt', fs.constants.O_RDONLY);
+    assert.strictEqual(fs.fstatSync(fd).size, 3);
+    fs.closeSync(fd);
+  });
+
+  it('write flags route to the VFS on a plain mount and fall through on an overlay', () => {
+    vfs = create();
+    vfs.writeFileSync('/exists.txt', 'x');
+    vfs.mount('/vfs-test-fd-write');
+
+    const fd = fs.openSync('/vfs-test-fd-write/created.txt', 'w');
+    fs.closeSync(fd);
+    assert.ok(vfs.existsSync('/vfs-test-fd-write/created.txt'));
+    vfs.unmount();
+
+    // an overlay mount leaves writes on the real fs, matching readFileSync and createReadStream
+    vfs = create({ overlay: true });
+    vfs.writeFileSync('/exists.txt', 'x');
+    vfs.mount('/vfs-test-fd-write-overlay');
+
+    assert.throws(
+      () => fs.openSync('/vfs-test-fd-write-overlay/created.txt', 'w'),
+      (err) => err.code === 'ENOENT',
+    );
+    assert.ok(!vfs.existsSync('/vfs-test-fd-write-overlay/created.txt'));
+  });
+
+  it('the fd-taking overloads of readFile, writeFile and appendFile reject a virtual fd', () => {
+    vfs = create();
+    vfs.writeFileSync('/content.txt', 'hello world');
+    vfs.mount('/vfs-test-fd-filemembers');
+
+    const fd = fs.openSync('/vfs-test-fd-filemembers/content.txt');
+    // the reserved placeholder is a real descriptor, so an unrouted member would otherwise
+    // read the null device and answer with empty content
+    assert.throws(() => fs.readFileSync(fd, 'utf8'), (err) => err.code === 'EBADF');
+    assert.throws(() => fs.writeFileSync(fd, 'x'), (err) => err.code === 'EBADF');
+    assert.throws(() => fs.appendFileSync(fd, 'x'), (err) => err.code === 'EBADF');
+    assert.throws(() => fs.createReadStream(fd), (err) => err.code === 'EBADF');
+    assert.throws(() => fs.createReadStream('/any', { fd }), (err) => err.code === 'EBADF');
+    fs.closeSync(fd);
+  });
+
+  it('fs.readFile calls back with EBADF for a virtual fd', (_t, done) => {
+    vfs = create();
+    vfs.writeFileSync('/cbcontent.txt', 'hello');
+    vfs.mount('/vfs-test-fd-readfile-cb');
+
+    const fd = fs.openSync('/vfs-test-fd-readfile-cb/cbcontent.txt');
+    fs.readFile(fd, (err) => {
+      assert.strictEqual(err.code, 'EBADF');
+      fs.closeSync(fd);
+      done();
+    });
+  });
+
+  it('patching fs.read keeps the shape util.promisify expects on a real fd', async () => {
+    vfs = create();
+    vfs.writeFileSync('/unused.txt', 'x');
+    vfs.mount('/vfs-test-fd-promisify');
+
+    const fd = fs.openSync(__filename, 'r');
+    // node reads kCustomPromisifyArgs off fs.read to resolve {bytesRead, buffer}
+    const result = await promisify(fs.read)(fd, Buffer.alloc(4), 0, 4, 0);
+    fs.closeSync(fd);
+
+    assert.strictEqual(result.bytesRead, 4);
+    assert.ok(Buffer.isBuffer(result.buffer));
+  });
+
+  it('fs.readSync serves the no-buffer overloads from a virtual fd', () => {
+    vfs = create();
+    vfs.writeFileSync('/nobuf.txt', 'abcdef');
+    vfs.mount('/vfs-test-fd-nobuf');
+
+    const fd = fs.openSync('/vfs-test-fd-nobuf/nobuf.txt');
+    assert.strictEqual(fs.readSync(fd), 6);
+    assert.strictEqual(fs.readSync(fd, { position: 2, length: 3 }), 3);
+    fs.closeSync(fd);
+  });
+
+  it('fs.read serves the no-buffer overloads from a virtual fd', (_t, done) => {
+    vfs = create();
+    vfs.writeFileSync('/nobuf-cb.txt', 'abcdef');
+    vfs.mount('/vfs-test-fd-nobuf-cb');
+
+    const fd = fs.openSync('/vfs-test-fd-nobuf-cb/nobuf-cb.txt');
+    fs.read(fd, (err, bytesRead, buffer) => {
+      assert.ifError(err);
+      assert.strictEqual(bytesRead, 6);
+      assert.strictEqual(buffer.subarray(0, 6).toString(), 'abcdef');
+      fs.read(fd, { position: 1, length: 2 }, (err2, bytesRead2, buffer2) => {
+        assert.ifError(err2);
+        assert.strictEqual(bytesRead2, 2);
+        assert.strictEqual(buffer2.subarray(0, 2).toString(), 'bc');
+        fs.closeSync(fd);
+        done();
+      });
+    });
+  });
+
+  it('a negative position reads from the current position, as node does', () => {
+    vfs = create();
+    vfs.writeFileSync('/neg.txt', 'abcdef');
+    vfs.mount('/vfs-test-fd-negative');
+
+    const fd = fs.openSync('/vfs-test-fd-negative/neg.txt');
+    const first = Buffer.alloc(3);
+    const second = Buffer.alloc(3);
+    assert.strictEqual(fs.readSync(fd, first, 0, 3, -1), 3);
+    assert.strictEqual(fs.readSync(fd, second, 0, 3, -1), 3);
+    fs.closeSync(fd);
+
+    assert.strictEqual(first.toString(), 'abc');
+    assert.strictEqual(second.toString(), 'def');
+  });
+
+  it('an out-of-range bigint position throws ERR_OUT_OF_RANGE', () => {
+    vfs = create();
+    vfs.writeFileSync('/bigrange.txt', 'abcdef');
+    vfs.mount('/vfs-test-fd-bigrange');
+
+    const fd = fs.openSync('/vfs-test-fd-bigrange/bigrange.txt');
+    assert.throws(
+      () => fs.readSync(fd, Buffer.alloc(4), 0, 4, BigInt(Number.MAX_SAFE_INTEGER) + 1n),
+      (err) => err.code === 'ERR_OUT_OF_RANGE',
+    );
+    fs.closeSync(fd);
+  });
+
+  it('fs.read and fs.fstat reject a missing callback synchronously', () => {
+    vfs = create();
+    vfs.writeFileSync('/nocb.txt', 'abc');
+    vfs.mount('/vfs-test-fd-nocb');
+
+    const fd = fs.openSync('/vfs-test-fd-nocb/nocb.txt');
+    // dispatching to an undefined callback would crash the process from a tick nobody catches
+    assert.throws(
+      () => fs.read(fd, Buffer.alloc(3), 0, 3, 0),
+      (err) => err.code === 'ERR_INVALID_ARG_TYPE',
+    );
+    assert.throws(() => fs.fstat(fd), (err) => err.code === 'ERR_INVALID_ARG_TYPE');
+    fs.closeSync(fd);
+  });
+
+  it('numeric open flags ignore advisory bits and reject unmapped combinations', (_t, done) => {
+    vfs = create();
+    vfs.writeFileSync('/flags.txt', 'abc');
+    vfs.mount('/vfs-test-fd-flags');
+
+    const fd = fs.openSync('/vfs-test-fd-flags/flags.txt', fs.constants.O_RDONLY | fs.constants.O_CLOEXEC);
+    assert.strictEqual(fs.fstatSync(fd).size, 3);
+    fs.closeSync(fd);
+
+    assert.throws(
+      () => fs.openSync('/vfs-test-fd-flags/flags.txt', fs.constants.O_EXCL),
+      (err) => err.code === 'ERR_INVALID_ARG_VALUE',
+    );
+    // the async form reports it through the callback rather than throwing at the call site
+    fs.open('/vfs-test-fd-flags/flags.txt', fs.constants.O_EXCL, (err) => {
+      assert.strictEqual(err.code, 'ERR_INVALID_ARG_VALUE');
+      done();
+    });
+  });
+
+  it('fs.open rejects a missing callback synchronously', () => {
+    vfs = create();
+    vfs.writeFileSync('/opencb.txt', 'x');
+    vfs.mount('/vfs-test-fd-opencb');
+
+    assert.throws(
+      () => fs.open('/vfs-test-fd-opencb/opencb.txt'),
+      (err) => err.code === 'ERR_INVALID_ARG_TYPE',
+    );
+  });
+
+  it('every stat route agrees on bigint, and a provider that answers it still works', (_t, done) => {
+    vfs = create();
+    vfs.writeFileSync('/bigstat.txt', 'data');
+    vfs.mount('/vfs-test-fd-bigstat-routes');
+    const p = '/vfs-test-fd-bigstat-routes/bigstat.txt';
+
+    // the memory provider has no bigint shape, so every route must refuse rather than
+    // hand back Number fields from one and throw from another
+    assert.throws(() => fs.statSync(p, { bigint: true }), (err) => err.code === 'ERR_INVALID_ARG_VALUE');
+    assert.throws(() => fs.lstatSync(p, { bigint: true }), (err) => err.code === 'ERR_INVALID_ARG_VALUE');
+
+    const fd = fs.openSync(p);
+    assert.throws(() => fs.fstatSync(fd, { bigint: true }), (err) => err.code === 'ERR_INVALID_ARG_VALUE');
+    fs.closeSync(fd);
+
+    fs.stat(p, { bigint: true }, (statErr) => {
+      assert.strictEqual(statErr.code, 'ERR_INVALID_ARG_VALUE');
+      fs.promises.stat(p, { bigint: true }).then(
+        () => assert.fail('promises.stat should refuse bigint here'),
+        (err) => {
+          assert.strictEqual(err.code, 'ERR_INVALID_ARG_VALUE');
+          done();
+        },
+      );
+    });
+  });
+
+  it('RealFSProvider reads the disk even when a VFS is mounted on its root', () => {
+    // the provider *is* the real filesystem: if its own fs calls went through the patched
+    // members they would re-enter the mount table that routes back to it
+    const root = mkdtempSync(join(tmpdir(), 'vfs-reentry-'));
+    try {
+      writeFileSync(join(root, 'real.txt'), 'REAL-DISK-CONTENT');
+
+      vfs = create(new RealFSProvider(root));
+      const shadow = create();
+      shadow.writeFileSync('/real.txt', 'SHADOW-FROM-MEMORY');
+      shadow.mount(root);
+      vfs.mount('/vfs-test-reentry');
+
+      try {
+        assert.strictEqual(
+          fs.readFileSync('/vfs-test-reentry/real.txt', 'utf8'),
+          'REAL-DISK-CONTENT',
+        );
+
+        const fd = fs.openSync('/vfs-test-reentry/real.txt');
+        const buffer = Buffer.alloc(17);
+        const bytesRead = fs.readSync(fd, buffer, 0, 17, 0);
+        fs.closeSync(fd);
+        assert.strictEqual(buffer.subarray(0, bytesRead).toString(), 'REAL-DISK-CONTENT');
+      } finally {
+        shadow.unmount();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('RealFSProvider async methods reach the disk while a VFS is mounted', async () => {
+    // the async half goes through fs.promises.*, which installFsPatches replaces in place
+    const root = mkdtempSync(join(tmpdir(), 'vfs-reentry-async-'));
+    try {
+      writeFileSync(join(root, 'real.txt'), 'REAL-DISK-CONTENT');
+
+      vfs = create(new RealFSProvider(root));
+      vfs.mount('/vfs-test-reentry-async');
+      const provider = vfs.provider;
+
+      assert.strictEqual((await provider.stat('/real.txt')).size, 17);
+      assert.strictEqual((await provider.lstat('/real.txt')).size, 17);
+      assert.deepStrictEqual(await provider.readdir('/'), ['real.txt']);
+      assert.strictEqual(String(await provider.readFile('/real.txt')), 'REAL-DISK-CONTENT');
+      await provider.access('/real.txt');
+      assert.match(await provider.realpath('/real.txt'), /real\.txt$/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('vfs.promises.stat applies the same bigint rule as its sync sibling', async () => {
+    vfs = create();
+    vfs.writeFileSync('/pstat.txt', 'data');
+    vfs.mount('/vfs-test-promises-bigint');
+
+    await assert.rejects(
+      vfs.promises.stat('/vfs-test-promises-bigint/pstat.txt', { bigint: true }),
+      (err) => err.code === 'ERR_INVALID_ARG_VALUE',
+    );
+    await assert.rejects(
+      vfs.promises.lstat('/vfs-test-promises-bigint/pstat.txt', { bigint: true }),
+      (err) => err.code === 'ERR_INVALID_ARG_VALUE',
+    );
+    assert.strictEqual(
+      (await vfs.promises.stat('/vfs-test-promises-bigint/pstat.txt')).size, 4);
+  });
+
+  it('a provider mounted at its own root does not recurse', () => {
+    const root = mkdtempSync(join(tmpdir(), 'vfs-selfmount-'));
+    try {
+      writeFileSync(join(root, 'real.txt'), 'REAL-DISK-CONTENT');
+      vfs = create(new RealFSProvider(root));
+      vfs.mount(root);
+      assert.strictEqual(fs.readFileSync(join(root, 'real.txt'), 'utf8'), 'REAL-DISK-CONTENT');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('a provider that does answer bigint is not blocked', () => {
+    const real = create(new RealFSProvider(process.cwd()), { moduleHooks: false });
+    assert.strictEqual(typeof real.statSync('/package.json', { bigint: true }).size, 'bigint');
+    assert.strictEqual(typeof real.statSync('/package.json').size, 'number');
+  });
+
+  it('an unrouted fd member with no callback throws instead of dispatching', () => {
+    vfs = create();
+    vfs.writeFileSync('/nocb2.txt', 'x');
+    vfs.mount('/vfs-test-fd-unrouted-nocb');
+
+    const fd = fs.openSync('/vfs-test-fd-unrouted-nocb/nocb2.txt');
+    assert.throws(() => fs.fsync(fd), (err) => err.code === 'EBADF');
+    fs.closeSync(fd);
+  });
+
+  it('real-fd fstat and close still work asynchronously while a VFS is mounted', (_t, done) => {
+    vfs = create();
+    vfs.writeFileSync('/unused2.txt', 'x');
+    vfs.mount('/vfs-test-fd-real-async');
+
+    const fd = fs.openSync(__filename, 'r');
+    fs.fstat(fd, (statErr, stats) => {
+      assert.ifError(statErr);
+      assert.ok(stats.size > 0);
+      fs.close(fd, (closeErr) => {
+        assert.ifError(closeErr);
+        done();
+      });
+    });
+  });
+
+  it('EBADF carries errno and names the fd in its message', () => {
+    vfs = create();
+    vfs.writeFileSync('/errctx.txt', 'x');
+    vfs.mount('/vfs-test-fd-errctx');
+
+    const fd = fs.openSync('/vfs-test-fd-errctx/errctx.txt');
+    fs.closeSync(fd);
+
+    // through fs.* a released fd is no longer ours and falls through to the real fs, as a
+    // closed real descriptor would; the VFS API is where our own EBADF is raised
+    assert.throws(() => vfs.readSync(fd, Buffer.alloc(1), 0, 1, 0), (err) => {
+      assert.strictEqual(err.code, 'EBADF');
+      assert.strictEqual(err.errno, -9);
+      assert.strictEqual(err.fd, fd);
+      assert.match(err.message, new RegExp(`fd ${fd}$`));
+      return true;
+    });
+  });
+
+  it('the fs patches serve real paths after unmount and route again on a second mount', () => {
+    vfs = create();
+    vfs.writeFileSync('/first.txt', 'first');
+    vfs.mount('/vfs-test-fd-isolation');
+
+    const first = fs.openSync('/vfs-test-fd-isolation/first.txt');
+    assert.strictEqual(fs.fstatSync(first).size, 5);
+    fs.closeSync(first);
+    vfs.unmount();
+
+    const realFd = fs.openSync(__filename, 'r');
+    assert.ok(fs.fstatSync(realFd).size > 0);
+    fs.closeSync(realFd);
+    assert.throws(
+      () => fs.openSync('/vfs-test-fd-isolation/first.txt'),
+      (err) => err.code === 'ENOENT',
+    );
+
+    vfs = create();
+    vfs.writeFileSync('/second.txt', 'second!');
+    vfs.mount('/vfs-test-fd-isolation-2');
+
+    const second = fs.openSync('/vfs-test-fd-isolation-2/second.txt');
+    assert.strictEqual(fs.fstatSync(second).size, 7);
+    fs.closeSync(second);
   });
 });

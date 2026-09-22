@@ -60,7 +60,7 @@ vfs.mount('/prefix');   // Start intercepting paths under /prefix
 vfs.unmount();          // Stop intercepting
 ```
 
-`mount()` returns the VFS instance for chaining. When mounted with `moduleHooks: true` (the default), `require()`, `import`, and core `fs` functions (`readFileSync`, `statSync`, `existsSync`, `readdirSync`, `realpathSync`, `watch`, etc.) are patched to serve files from the VFS.
+`mount()` returns the VFS instance for chaining. When mounted with `moduleHooks: true` (the default), `require()`, `import`, and core `fs` functions (`readFileSync`, `statSync`, `existsSync`, `readdirSync`, `realpathSync`, `openSync`, `watch`, etc.) are patched to serve files from the VFS.
 
 Emits `vfs-mount` and `vfs-unmount` events on `process`.
 
@@ -252,9 +252,39 @@ Higher-level operations (`readFile`, `writeFile`, `copyFile`, `exists`, `access`
 When `moduleHooks` is enabled (the default), mounting a VFS instance:
 
 1. **Patches `require()` and `import`** — On Node.js 23.5+ uses `Module.registerHooks()`. On older versions falls back to `Module._resolveFilename` + `Module._extensions` patching.
-2. **Patches core `fs` functions** — `readFileSync`, `statSync`, `lstatSync`, `readdirSync`, `existsSync`, `realpathSync`, `watch`, `watchFile`, `unwatchFile`.
+2. **Patches core `fs` functions** — in four groups:
+   - **sync reads and metadata** — `readFileSync`, `statSync`, `lstatSync`, `readdirSync`, `existsSync`,
+     `realpathSync`, `readlinkSync`, `accessSync`
+   - **callback forms** — `stat`, `lstat`, `readFile`, `readdir`, `realpath`, `readlink`, `access`,
+     `createReadStream`, `watch`, `watchFile`, `unwatchFile`
+   - **the descriptor family** — `openSync`/`open`, `readSync`/`read`, `closeSync`/`close`,
+     `fstatSync`/`fstat`, plus guards on the 22 other fd-taking members (see *Descriptor limits*)
+   - **`fs.promises`** — `access`, `readFile`, `stat`, `lstat`, `readdir`, `readlink`, `realpath`.
+     `fs.promises.open` is the one member left alone; see *Descriptor limits*.
 
 This means third-party code using `require()` or `fs.readFileSync()` will transparently pick up files from the VFS.
+
+Paths route the same whether they arrive as a string, a `Buffer` or a `file:` URL, and a relative path is
+resolved against the virtual cwd when the VFS was created with `virtualCwd: true`.
+
+`bigint: true` is answered by the provider when the provider can. `RealFSProvider` forwards to the real
+filesystem and returns genuine `BigIntStats`; `MemoryProvider` and `SqliteProvider` have no bigint shape, and
+a request they cannot answer is refused with `ERR_INVALID_ARG_VALUE` rather than served with Number fields
+that would fail on the caller's first `stats.size > 0n`. The rule applies to every stat entry point:
+`statSync`, `lstatSync`, `fstatSync`, `stat`, `lstat`, `fstat` and the `fs.promises` forms.
+
+### Descriptor limits
+
+Three things about the descriptor family are worth knowing before you rely on it:
+
+- **`fs.promises.open` is not patched.** It has to return a real `FileHandle`, which a virtual file cannot
+  supply, so it still throws `ENOENT` for a path inside a mount. Use `fs.openSync`/`fs.open`.
+- **Only `read`, `close` and `fstat` accept a virtual fd.** Every other `fs` member that takes one —
+  `writeSync`, `writev`, `readv`, `ftruncate`, `fsync`, `fdatasync`, `fchmod`, `fchown`, `futimes`, the fd
+  overloads of `readFile`, `writeFile` and `appendFile`, and `createReadStream` — rejects it with `EBADF`
+  rather than acting on an unrelated file.
+- **Write flags are not routed by the mount.** `fs.openSync(path, 'w')` under an overlay mount falls through
+  to the real filesystem, the same way `readFileSync` and `createReadStream` already treat overlay paths.
 
 Module resolution supports package.json `exports`, `main`, and bare specifier resolution walking `node_modules`.
 
