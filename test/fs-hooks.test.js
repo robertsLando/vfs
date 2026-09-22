@@ -803,6 +803,60 @@ describe('Module hooks — fd family patches', () => {
     });
   });
 
+  it('overlapping fs.close on a VFS fd refuses all but one, as it does on a real fd', (_t, done) => {
+    vfs = create();
+    vfs.writeFileSync('/race.txt', 'x');
+    vfs.mount('/vfs-test-fd-race');
+
+    const fd = fs.openSync('/vfs-test-fd-race/race.txt');
+    const results = [];
+    const collect = (err) => {
+      results.push(err ? err.code : 'ok');
+      if (results.length < 2) {
+        return;
+      }
+      assert.deepStrictEqual(results.sort(), ['EBADF', 'ok']);
+      done();
+    };
+
+    fs.close(fd, collect);
+    fs.close(fd, collect);
+  });
+
+  it('a close in flight holds its fd number, so a new open cannot take it', (_t, done) => {
+    vfs = create();
+    vfs.writeFileSync('/held.txt', 'held');
+    vfs.writeFileSync('/other.txt', 'other');
+    vfs.mount('/vfs-test-fd-held');
+
+    const fd = fs.openSync('/vfs-test-fd-held/held.txt');
+    fs.close(fd, (err) => {
+      assert.ifError(err);
+      fs.closeSync(other);
+      done();
+    });
+
+    // opened while the close above is still pending
+    const other = fs.openSync('/vfs-test-fd-held/other.txt');
+    assert.notStrictEqual(other, fd);
+    assert.strictEqual(fs.readFileSync('/vfs-test-fd-held/other.txt', 'utf8'), 'other');
+  });
+
+  it('fs.read and fs.fstat on an fd whose close is in flight fail with EBADF', (_t, done) => {
+    vfs = create();
+    vfs.writeFileSync('/inflight.txt', 'abc');
+    vfs.mount('/vfs-test-fd-inflight');
+
+    const fd = fs.openSync('/vfs-test-fd-inflight/inflight.txt');
+    fs.close(fd, (err) => {
+      assert.ifError(err);
+      done();
+    });
+
+    assert.throws(() => fs.readSync(fd, Buffer.alloc(1), 0, 1, 0), (err) => err.code === 'EBADF');
+    assert.throws(() => fs.fstatSync(fd), (err) => err.code === 'EBADF');
+  });
+
   it('real-fd shorthand overloads still work while a VFS is mounted', (_t, done) => {
     vfs = create();
     vfs.writeFileSync('/unused.txt', 'x');
