@@ -267,6 +267,12 @@ This means third-party code using `require()` or `fs.readFileSync()` will transp
 Paths route the same whether they arrive as a string, a `Buffer` or a `file:` URL, and a relative path is
 resolved against the virtual cwd when the VFS was created with `virtualCwd: true`.
 
+`bigint: true` is answered by the provider when the provider can. `RealFSProvider` forwards to the real
+filesystem and returns genuine `BigIntStats`; `MemoryProvider` and `SqliteProvider` have no bigint shape, and
+a request they cannot answer is refused with `ERR_INVALID_ARG_VALUE` rather than served with Number fields
+that would fail on the caller's first `stats.size > 0n`. The rule applies to every stat entry point:
+`statSync`, `lstatSync`, `fstatSync`, `stat`, `lstat`, `fstat` and the `fs.promises` forms.
+
 ### Descriptor limits
 
 Three things about the descriptor family are worth knowing before you rely on it:
