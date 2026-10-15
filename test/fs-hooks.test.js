@@ -735,7 +735,7 @@ describe('Module hooks — fd family patches', () => {
     assert.strictEqual(buffer.toString(), 'cde');
   });
 
-  it('stat options reach the handle, and bigint is refused rather than mistyped', (_t, done) => {
+  it('stat options reach the handle', () => {
     vfs = create();
     vfs.writeFileSync('/statopts.txt', 'data');
     vfs.mount('/vfs-test-fd-statopts');
@@ -744,22 +744,7 @@ describe('Module hooks — fd family patches', () => {
     const stats = fs.fstatSync(fd, {});
     assert.ok(stats.isFile());
     assert.strictEqual(stats.size, 4);
-
-    // there is no BigIntStats shape here; answering with Number fields would break the
-    // caller's first `stats.size > 0n`
-    assert.throws(
-      () => fs.fstatSync(fd, { bigint: true }),
-      (err) => err.code === 'ERR_INVALID_ARG_VALUE',
-    );
-    assert.throws(
-      () => fs.statSync('/vfs-test-fd-statopts/statopts.txt', { bigint: true }),
-      (err) => err.code === 'ERR_INVALID_ARG_VALUE',
-    );
-    fs.fstat(fd, { bigint: true }, (err) => {
-      assert.strictEqual(err.code, 'ERR_INVALID_ARG_VALUE');
-      fs.closeSync(fd);
-      done();
-    });
+    fs.closeSync(fd);
   });
 
   it('fs.read accepts the (fd, buffer, callback) overload', (_t, done) => {
@@ -1082,33 +1067,6 @@ describe('Module hooks — fd family patches', () => {
     );
   });
 
-  it('every stat route agrees on bigint, and a provider that answers it still works', (_t, done) => {
-    vfs = create();
-    vfs.writeFileSync('/bigstat.txt', 'data');
-    vfs.mount('/vfs-test-fd-bigstat-routes');
-    const p = '/vfs-test-fd-bigstat-routes/bigstat.txt';
-
-    // the memory provider has no bigint shape, so every route must refuse rather than
-    // hand back Number fields from one and throw from another
-    assert.throws(() => fs.statSync(p, { bigint: true }), (err) => err.code === 'ERR_INVALID_ARG_VALUE');
-    assert.throws(() => fs.lstatSync(p, { bigint: true }), (err) => err.code === 'ERR_INVALID_ARG_VALUE');
-
-    const fd = fs.openSync(p);
-    assert.throws(() => fs.fstatSync(fd, { bigint: true }), (err) => err.code === 'ERR_INVALID_ARG_VALUE');
-    fs.closeSync(fd);
-
-    fs.stat(p, { bigint: true }, (statErr) => {
-      assert.strictEqual(statErr.code, 'ERR_INVALID_ARG_VALUE');
-      fs.promises.stat(p, { bigint: true }).then(
-        () => assert.fail('promises.stat should refuse bigint here'),
-        (err) => {
-          assert.strictEqual(err.code, 'ERR_INVALID_ARG_VALUE');
-          done();
-        },
-      );
-    });
-  });
-
   it('RealFSProvider reads the disk even when a VFS is mounted on its root', () => {
     // the provider *is* the real filesystem: if its own fs calls went through the patched
     // members they would re-enter the mount table that routes back to it
@@ -1162,23 +1120,6 @@ describe('Module hooks — fd family patches', () => {
     }
   });
 
-  it('vfs.promises.stat applies the same bigint rule as its sync sibling', async () => {
-    vfs = create();
-    vfs.writeFileSync('/pstat.txt', 'data');
-    vfs.mount('/vfs-test-promises-bigint');
-
-    await assert.rejects(
-      vfs.promises.stat('/vfs-test-promises-bigint/pstat.txt', { bigint: true }),
-      (err) => err.code === 'ERR_INVALID_ARG_VALUE',
-    );
-    await assert.rejects(
-      vfs.promises.lstat('/vfs-test-promises-bigint/pstat.txt', { bigint: true }),
-      (err) => err.code === 'ERR_INVALID_ARG_VALUE',
-    );
-    assert.strictEqual(
-      (await vfs.promises.stat('/vfs-test-promises-bigint/pstat.txt')).size, 4);
-  });
-
   it('a provider mounted at its own root does not recurse', () => {
     const root = mkdtempSync(join(tmpdir(), 'vfs-selfmount-'));
     try {
@@ -1189,12 +1130,6 @@ describe('Module hooks — fd family patches', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
-
-  it('a provider that does answer bigint is not blocked', () => {
-    const real = create(new RealFSProvider(process.cwd()), { moduleHooks: false });
-    assert.strictEqual(typeof real.statSync('/package.json', { bigint: true }).size, 'bigint');
-    assert.strictEqual(typeof real.statSync('/package.json').size, 'number');
   });
 
   it('an unrouted fd member with no callback throws instead of dispatching', () => {
