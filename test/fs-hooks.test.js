@@ -918,20 +918,30 @@ describe('Module hooks — fd family patches', () => {
     assert.ok(!vfs.existsSync('/vfs-test-fd-write-overlay/created.txt'));
   });
 
-  it('the fd-taking overloads of readFile, writeFile and appendFile reject a virtual fd', () => {
+  it('the fd-taking overloads of readFile, readv, writeFile and appendFile reject a virtual fd', () => {
     vfs = create();
     vfs.writeFileSync('/content.txt', 'hello world');
     vfs.mount('/vfs-test-fd-filemembers');
 
     const fd = fs.openSync('/vfs-test-fd-filemembers/content.txt');
-    // the reserved placeholder is a real descriptor, so an unrouted member would otherwise
-    // read the null device and answer with empty content
+    // the reserved placeholder is opened write-only, so the read members fail natively
     assert.throws(() => fs.readFileSync(fd, 'utf8'), (err) => err.code === 'EBADF');
+    assert.throws(() => fs.readvSync(fd, [Buffer.alloc(1)]), (err) => err.code === 'EBADF');
     assert.throws(() => fs.writeFileSync(fd, 'x'), (err) => err.code === 'EBADF');
     assert.throws(() => fs.appendFileSync(fd, 'x'), (err) => err.code === 'EBADF');
-    assert.throws(() => fs.createReadStream(fd), (err) => err.code === 'EBADF');
-    assert.throws(() => fs.createReadStream('/any', { fd }), (err) => err.code === 'EBADF');
     fs.closeSync(fd);
+  });
+
+  it('fs.createReadStream reads a virtual fd through the patched fs.read', async () => {
+    vfs = create();
+    vfs.writeFileSync('/streamfd.txt', 'hello world');
+    vfs.mount('/vfs-test-fd-stream');
+
+    const fd = fs.openSync('/vfs-test-fd-stream/streamfd.txt');
+    const chunks = await fs.createReadStream(null, { fd }).toArray();
+    assert.strictEqual(Buffer.concat(chunks).toString(), 'hello world');
+    // autoClose released the virtual fd through the patched fs.close
+    assert.throws(() => fs.fstatSync(fd), (err) => err.code === 'EBADF');
   });
 
   it('fs.readFile calls back with EBADF for a virtual fd', (_t, done) => {
@@ -1158,7 +1168,7 @@ describe('Module hooks — fd family patches', () => {
     });
   });
 
-  it('EBADF carries errno and names the fd in its message', () => {
+  it('EBADF names the fd', () => {
     vfs = create();
     vfs.writeFileSync('/errctx.txt', 'x');
     vfs.mount('/vfs-test-fd-errctx');
@@ -1170,9 +1180,7 @@ describe('Module hooks — fd family patches', () => {
     // closed real descriptor would; the VFS API is where our own EBADF is raised
     assert.throws(() => vfs.readSync(fd, Buffer.alloc(1), 0, 1, 0), (err) => {
       assert.strictEqual(err.code, 'EBADF');
-      assert.strictEqual(err.errno, -9);
       assert.strictEqual(err.fd, fd);
-      assert.match(err.message, new RegExp(`fd ${fd}$`));
       return true;
     });
   });

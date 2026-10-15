@@ -273,10 +273,10 @@ Three things about the descriptor family are worth knowing before you rely on it
 
 - **`fs.promises.open` is not patched.** It has to return a real `FileHandle`, which a virtual file cannot
   supply, so it still throws `ENOENT` for a path inside a mount. Use `fs.openSync`/`fs.open`.
-- **Only `read`, `close` and `fstat` accept a virtual fd.** Every other `fs` member that takes one —
-  `writeSync`, `writev`, `readv`, `ftruncate`, `fsync`, `fdatasync`, `fchmod`, `fchown`, `futimes`, the fd
-  overloads of `readFile`, `writeFile` and `appendFile`, and `createReadStream` — rejects it with `EBADF`
-  rather than acting on an unrelated file.
+- **Only `read`, `close` and `fstat` accept a virtual fd**, plus `createReadStream({ fd })`, which reads
+  through them. Every other `fs` member that takes one — `writeSync`, `writev`, `readv`, `ftruncate`,
+  `fsync`, `fdatasync`, `fchmod`, `fchown`, `futimes`, and the fd overloads of `readFile`, `writeFile` and
+  `appendFile` — rejects it with `EBADF` rather than acting on an unrelated file.
 - **Write flags are not routed by the mount.** `fs.openSync(path, 'w')` under an overlay mount falls through
   to the real filesystem, the same way `readFileSync` and `createReadStream` already treat overlay paths.
 
