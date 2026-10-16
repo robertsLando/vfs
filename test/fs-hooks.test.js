@@ -735,7 +735,7 @@ describe('Module hooks — fd family patches', () => {
     assert.strictEqual(buffer.toString(), 'cde');
   });
 
-  it('stat options reach the handle', () => {
+  it('fs.fstatSync accepts an options object', () => {
     vfs = create();
     vfs.writeFileSync('/statopts.txt', 'data');
     vfs.mount('/vfs-test-fd-statopts');
@@ -924,8 +924,11 @@ describe('Module hooks — fd family patches', () => {
     vfs.mount('/vfs-test-fd-filemembers');
 
     const fd = fs.openSync('/vfs-test-fd-filemembers/content.txt');
-    // the reserved placeholder is opened write-only, so the read members fail natively
     assert.throws(() => fs.readFileSync(fd, 'utf8'), (err) => err.code === 'EBADF');
+    // non-utf8 reads loop over the patched readSync, so these need the explicit guard
+    assert.throws(() => fs.readFileSync(fd), (err) => err.code === 'EBADF');
+    assert.throws(() => fs.readFileSync(fd, 'latin1'), (err) => err.code === 'EBADF');
+    // the reserved placeholder is opened write-only, so readv fails natively
     assert.throws(() => fs.readvSync(fd, [Buffer.alloc(1)]), (err) => err.code === 'EBADF');
     assert.throws(() => fs.writeFileSync(fd, 'x'), (err) => err.code === 'EBADF');
     assert.throws(() => fs.appendFileSync(fd, 'x'), (err) => err.code === 'EBADF');
@@ -942,6 +945,43 @@ describe('Module hooks — fd family patches', () => {
     assert.strictEqual(Buffer.concat(chunks).toString(), 'hello world');
     // autoClose released the virtual fd through the patched fs.close
     assert.throws(() => fs.fstatSync(fd), (err) => err.code === 'EBADF');
+  });
+
+  it('fs.createReadStream honours start, end and autoClose on a virtual fd', async () => {
+    vfs = create();
+    vfs.writeFileSync('/streamrange.txt', 'hello world');
+    vfs.mount('/vfs-test-fd-stream-range');
+
+    const fd = fs.openSync('/vfs-test-fd-stream-range/streamrange.txt');
+    const stream = fs.createReadStream(null, { fd, start: 2, end: 6, autoClose: false });
+    assert.strictEqual(Buffer.concat(await stream.toArray()).toString(), 'llo w');
+    assert.strictEqual(fs.fstatSync(fd).size, 11);
+    fs.closeSync(fd);
+  });
+
+  it('fs.createReadStream reads the fd, not the path, when both are given', async () => {
+    vfs = create();
+    vfs.writeFileSync('/byfd.txt', 'from the fd');
+    vfs.writeFileSync('/bypath.txt', 'from the path');
+    vfs.mount('/vfs-test-fd-stream-both');
+
+    const fd = fs.openSync('/vfs-test-fd-stream-both/byfd.txt');
+    const stream = fs.createReadStream('/vfs-test-fd-stream-both/bypath.txt', { fd });
+    assert.strictEqual(Buffer.concat(await stream.toArray()).toString(), 'from the fd');
+    assert.throws(() => fs.fstatSync(fd), (err) => err.code === 'EBADF');
+  });
+
+  it('fs.readv calls back with EBADF for a virtual fd', (_t, done) => {
+    vfs = create();
+    vfs.writeFileSync('/readvcb.txt', 'hello');
+    vfs.mount('/vfs-test-fd-readv-cb');
+
+    const fd = fs.openSync('/vfs-test-fd-readv-cb/readvcb.txt');
+    fs.readv(fd, [Buffer.alloc(1)], (err) => {
+      assert.strictEqual(err.code, 'EBADF');
+      fs.closeSync(fd);
+      done();
+    });
   });
 
   it('fs.readFile calls back with EBADF for a virtual fd', (_t, done) => {
@@ -1109,22 +1149,29 @@ describe('Module hooks — fd family patches', () => {
     }
   });
 
-  it('RealFSProvider async methods reach the disk while a VFS is mounted', async () => {
+  it('RealFSProvider async methods reach the disk even when a VFS is mounted on its root', async () => {
     // the async half goes through fs.promises.*, which installFsPatches replaces in place
     const root = mkdtempSync(join(tmpdir(), 'vfs-reentry-async-'));
     try {
       writeFileSync(join(root, 'real.txt'), 'REAL-DISK-CONTENT');
 
       vfs = create(new RealFSProvider(root));
+      const shadow = create();
+      shadow.writeFileSync('/real.txt', 'SHADOW-FROM-MEMORY');
+      shadow.mount(root);
       vfs.mount('/vfs-test-reentry-async');
       const provider = vfs.provider;
 
-      assert.strictEqual((await provider.stat('/real.txt')).size, 17);
-      assert.strictEqual((await provider.lstat('/real.txt')).size, 17);
-      assert.deepStrictEqual(await provider.readdir('/'), ['real.txt']);
-      assert.strictEqual(String(await provider.readFile('/real.txt')), 'REAL-DISK-CONTENT');
-      await provider.access('/real.txt');
-      assert.match(await provider.realpath('/real.txt'), /real\.txt$/);
+      try {
+        assert.strictEqual((await provider.stat('/real.txt')).size, 17);
+        assert.strictEqual((await provider.lstat('/real.txt')).size, 17);
+        assert.deepStrictEqual(await provider.readdir('/'), ['real.txt']);
+        assert.strictEqual(String(await provider.readFile('/real.txt')), 'REAL-DISK-CONTENT');
+        await provider.access('/real.txt');
+        assert.match(await provider.realpath('/real.txt'), /real\.txt$/);
+      } finally {
+        shadow.unmount();
+      }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -1168,7 +1215,7 @@ describe('Module hooks — fd family patches', () => {
     });
   });
 
-  it('EBADF names the fd', () => {
+  it('EBADF carries the fd', () => {
     vfs = create();
     vfs.writeFileSync('/errctx.txt', 'x');
     vfs.mount('/vfs-test-fd-errctx');
