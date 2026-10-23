@@ -2,6 +2,7 @@
 
 const { describe, it, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const { create, VirtualFileSystem, MemoryProvider } = require('../index.js');
 
 describe('create()', () => {
@@ -176,8 +177,18 @@ describe('VirtualFileSystem - file descriptor operations', () => {
   it('openSync/closeSync work', () => {
     vfs.writeFileSync('/fd-test.txt', 'hello');
     const fd = vfs.openSync('/fd-test.txt');
-    assert.ok(typeof fd === 'number');
-    assert.ok(fd >= 10000);
+    assert.ok(Number.isInteger(fd) && fd >= 0);
+    vfs.closeSync(fd);
+  });
+
+  it('a virtual fd is a descriptor no real file can also hold', () => {
+    vfs.writeFileSync('/fd-unique.txt', 'hello');
+    const fd = vfs.openSync('/fd-unique.txt');
+    // the fd is reserved from the kernel, so opening real files cannot land on it
+    const realFds = [];
+    for (let i = 0; i < 64; i++) realFds.push(fs.openSync(__filename, 'r'));
+    assert.ok(!realFds.includes(fd));
+    for (const realFd of realFds) fs.closeSync(realFd);
     vfs.closeSync(fd);
   });
 
