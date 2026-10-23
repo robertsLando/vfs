@@ -269,7 +269,7 @@ resolved against the virtual cwd when the VFS was created with `virtualCwd: true
 
 ### Descriptor limits
 
-Three things about the descriptor family are worth knowing before you rely on it:
+Five things about the descriptor family are worth knowing before you rely on it:
 
 - **`fs.promises.open` is not patched.** It has to return a real `FileHandle`, which a virtual file cannot
   supply, so it still throws `ENOENT` for a path inside a mount. Use `fs.openSync`/`fs.open`.
@@ -279,6 +279,11 @@ Three things about the descriptor family are worth knowing before you rely on it
   `appendFile` — rejects it with `EBADF` rather than acting on an unrelated file.
 - **Write flags are not routed by the mount.** `fs.openSync(path, 'w')` under an overlay mount falls through
   to the real filesystem, the same way `readFileSync` and `createReadStream` already treat overlay paths.
+- **Each open virtual fd holds one real OS descriptor** (reserved on the null device so it can never collide
+  with a real fd). They count against `ulimit -n`, so close virtual fds as you would real ones
+  ([#8](https://github.com/robertsLando/vfs/issues/8)).
+- **`unmount()` does not close fds opened through the VFS.** They keep reading the file they opened, like a
+  real fd on an unlinked file, until you close them ([#7](https://github.com/robertsLando/vfs/issues/7)).
 
 Module resolution supports package.json `exports`, `main`, and bare specifier resolution walking `node_modules`.
 
