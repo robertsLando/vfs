@@ -264,7 +264,7 @@ This package started as an extraction of the Virtual File System proposed for No
 
 The two have drifted apart. `node:vfs` routes writes, file descriptors and `fs.promises.open` through the global `fs`; this package does not. This package can mount at a path you choose and has overlay mode, a virtual working directory and `SqliteProvider`; `node:vfs` has none of these.
 
-See [Comparison with `node:vfs`](docs/node-vfs-comparison.md) for the full feature table.
+See [Comparison with `node:vfs`](docs/node-vfs-comparison.md) for the full feature table and what pkg still needs before it can switch.
 
 ## License
 

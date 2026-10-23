@@ -1,7 +1,9 @@
 # Comparison with `node:vfs`
 
 Node.js now ships its own virtual file system as `node:vfs`. This page lists
-what each one supports, so you can tell whether you can switch.
+what each one supports, so you can tell whether you can switch. The main
+consumer is [pkg](https://github.com/yao-pkg/pkg)'s SEA mode, so the first
+section answers that question directly.
 
 Checked on 2026-10-23 against:
 
@@ -12,6 +14,34 @@ Checked on 2026-10-23 against:
 
 Most "Yes"/"No" cells were run with a probe script against both, not read off
 the docs. Rows marked _(docs)_ come from the Node.js docs or source only.
+
+## Can pkg drop this package for `node:vfs`?
+
+Not yet. pkg's SEA runtime (`prelude/sea-vfs-setup.js` and
+`prelude/sea-bootstrap-core.js` on pkg `main`) relies on these:
+
+| What pkg does | Works with `node:vfs`? |
+|---|---|
+| Loads `node:vfs` first and falls back to this package | Today yes: without the flag, `require('node:vfs')` throws `ERR_UNKNOWN_BUILTIN_MODULE`, so the fallback runs. **Breaks once a release ships `node:vfs` unflagged**: pkg will pick core and hit the next row |
+| `virtualFs.mount('/snapshot', { overlay: true })`, then every path, `__dirname`, `process.pkg` and `insideSnapshot()` assumes `/snapshot` | **No.** Core ignores the prefix and mounts at `/dev/null/vfs/<n>`; `/snapshot/...` is not found. pkg would need to use the returned mount point everywhere, or move to SEA `"useVfs"` / `"vfsArchive"` |
+| `SEAProvider extends MemoryProvider` and overrides `readFileSync`, `statSync`, `readdirSync`, `existsSync`, `readlinkSync` | Yes. Core calls the same provider methods |
+| Windows: wraps `VirtualFileSystem.prototype.shouldHandle` and `resolvePath` | **No.** Neither is on core's prototype, so the wrapper calls `undefined`. Core handles Windows paths itself, so the patch should be dropped, not ported |
+| `fs.openSync` / `readSync` / `closeSync` / `fstatSync` on packaged files ([pkg#302](https://github.com/yao-pkg/pkg/issues/302)) | Yes. Here it needs [#4](https://github.com/robertsLando/vfs/pull/4) |
+| Writes, `fs.promises.open`, `createWriteStream`, `opendir` on packaged paths | Yes. Not supported here |
+| Native addons: pkg patches `process.dlopen` to extract them | Core loads `.node` files from the VFS itself _(docs)_, so pkg's patch becomes optional |
+| Worker threads: pkg wraps `Worker` and re-runs the VFS setup inside it | Still needed. A mount made with `vfs.mount()` is not visible in a worker (reading it fails with `ENOTDIR`) |
+| Node.js versions pkg targets in SEA mode: 22+ | **No.** Core needs 26.4+, and the flag until the unflag lands in a release |
+
+What has to happen before pkg can switch:
+
+1. A Node.js release with `node:vfs` unflagged ([nodejs/node#66318](https://github.com/nodejs/node/pull/66318) is on `main` only).
+2. pkg stops hard-coding `/snapshot` and uses the path `mount()` returns, or SEA `"useVfs"`.
+3. pkg drops its Windows `shouldHandle`/`resolvePath` patch on the core path.
+4. pkg keeps this package as the fallback until it drops every Node.js version below the one that ships (1).
+
+Until (2) is done, pkg's `require('node:vfs')`-first fallback should be
+changed to prefer this package, or it will break on the first Node.js
+release that loads `node:vfs` without a flag.
 
 ## Summary
 
