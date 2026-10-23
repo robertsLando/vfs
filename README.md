@@ -260,7 +260,11 @@ Module resolution supports package.json `exports`, `main`, and bare specifier re
 
 ## Node.js core VFS support
 
-This package is a direct extraction of the Virtual File System being added to Node.js core ([nodejs/node#61478](https://github.com/nodejs/node/pull/61478)), allowing it to be used on Node.js 22+. Once the core PR lands, this package will no longer be necessary (except for `SqliteProvider`).
+This package started as an extraction of the Virtual File System proposed for Node.js core ([nodejs/node#61478](https://github.com/nodejs/node/pull/61478)), so it can be used on Node.js 22+. Core has since shipped it as `node:vfs` in Node.js 26.4, behind `--experimental-vfs`.
+
+The two have drifted apart. `node:vfs` routes writes, file descriptors and `fs.promises.open` through the global `fs`; this package does not. This package can mount at a path you choose and has overlay mode, a virtual working directory and `SqliteProvider`; `node:vfs` has none of these.
+
+See [Comparison with `node:vfs`](docs/node-vfs-comparison.md) for the full feature table.
 
 ## License
 
