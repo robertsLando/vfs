@@ -1,11 +1,11 @@
-# @platformatic/vfs
+# @roberts_lando/vfs
 
 A Virtual File System for Node.js. Provides an in-memory `fs`-compatible API with mount points, overlay mode, symlinks, module loading hooks, and custom storage providers.
 
 ## Install
 
 ```
-npm install @platformatic/vfs
+npm install @roberts_lando/vfs
 ```
 
 Requires Node.js >= 22.
@@ -13,7 +13,7 @@ Requires Node.js >= 22.
 ## Quick start
 
 ```js
-const { create } = require('@platformatic/vfs');
+const { create } = require('@roberts_lando/vfs');
 
 const vfs = create();
 
@@ -172,7 +172,7 @@ When mounted, `process.cwd()` and `process.chdir()` are patched to work with the
 The default provider. Stores everything in memory. Supports symlinks, watching, and read-only mode.
 
 ```js
-const { MemoryProvider, create } = require('@platformatic/vfs');
+const { MemoryProvider, create } = require('@roberts_lando/vfs');
 
 const provider = new MemoryProvider();
 const vfs = create(provider);
@@ -189,7 +189,7 @@ vfs.writeFileSync('/other.txt', 'fail'); // throws EROFS
 A persistent provider backed by Node.js built-in `node:sqlite`. Stores files, directories, and symlinks in a SQLite database. Supports both in-memory and file-backed databases.
 
 ```js
-const { SqliteProvider, create } = require('@platformatic/vfs');
+const { SqliteProvider, create } = require('@roberts_lando/vfs');
 
 // In-memory (default)
 const mem = new SqliteProvider();
@@ -216,7 +216,7 @@ Requires Node.js >= 22. Call `provider.close()` when done to close the database.
 Delegates to the real filesystem, sandboxed under a root directory. Directory traversal outside the root is prevented.
 
 ```js
-const { RealFSProvider, create } = require('@platformatic/vfs');
+const { RealFSProvider, create } = require('@roberts_lando/vfs');
 
 const provider = new RealFSProvider('/tmp/sandbox');
 const vfs = create(provider);
@@ -230,7 +230,7 @@ vfs.writeFileSync('/file.txt', 'data'); // writes to /tmp/sandbox/file.txt
 Extend `VirtualProvider` and implement the essential primitives:
 
 ```js
-const { VirtualProvider, create } = require('@platformatic/vfs');
+const { VirtualProvider, create } = require('@roberts_lando/vfs');
 
 class MyProvider extends VirtualProvider {
   openSync(path, flags, mode) { /* ... */ }
